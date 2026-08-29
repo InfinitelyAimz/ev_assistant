@@ -93,7 +93,8 @@ except Exception:
 WHISPER_PROMPT = (
     "E.V., Aimz, Sir, brightness, volume, mute, unmute, battery, "
     "system specs, RAM, CPU, weather, search, look up, price, Bitcoin, Ethereum, "
-    "Solana, dollar, rand, euro, pound, exchange rate, richest, net worth, YouTube, YouTube Music, play, pause."
+    "Solana, dollar, rand, euro, pound, exchange rate, richest, net worth, YouTube, "
+    "YouTube Music, play, pause, open, VS Code, Spotify, Discord, Explorer, Task Manager."
 )
 
 def listen(silence_limit=0.6, threshold=450):
@@ -154,7 +155,60 @@ def listen(silence_limit=0.6, threshold=450):
     return user_text
 
 # -------------------------------------------------------------
-# 2. HARDWARE, MARKET, WEB & MEDIA TOOLS
+# 2. APP LAUNCHER & WORKSPACE AUTOMATION
+# -------------------------------------------------------------
+APP_SHORTCUTS = {
+    "vscode": "code",
+    "vs code": "code",
+    "visual studio code": "code",
+    "spotify": "spotify",
+    "discord": "discord",
+    "notepad": "notepad",
+    "calculator": "calc",
+    "calc": "calc",
+    "explorer": "explorer",
+    "file explorer": "explorer",
+    "files": "explorer",
+    "task manager": "taskmgr",
+    "terminal": "wt",
+    "command prompt": "cmd",
+    "cmd": "cmd",
+    "settings": "ms-settings:"
+}
+
+def launch_application(app_name: str):
+    """Launches local Windows applications instantly via command or shell start."""
+    clean_app = app_name.lower().strip()
+    
+    # 1. Check known aliases and executables
+    target_cmd = APP_SHORTCUTS.get(clean_app, clean_app)
+    
+    try:
+        # Launch using Windows start shell
+        subprocess.Popen(f"start {target_cmd}", shell=True)
+        return f"Opening {app_name}, Aimz."
+    except Exception as e:
+        return f"Unable to launch {app_name}: {str(e)}"
+
+def lock_workstation():
+    """Locks the Windows session."""
+    ctypes.windll.user32.LockWorkStation()
+    return "Workstation locked, Aimz."
+
+def minimize_all_windows():
+    """Simulates Windows + D to toggle/minimize all windows."""
+    VK_LWIN = 0x5B
+    VK_D = 0x44
+    KEYEVENTF_KEYUP = 0x0002
+    
+    ctypes.windll.user32.keybd_event(VK_LWIN, 0, 0, 0)
+    ctypes.windll.user32.keybd_event(VK_D, 0, 0, 0)
+    ctypes.windll.user32.keybd_event(VK_D, 0, KEYEVENTF_KEYUP, 0)
+    ctypes.windll.user32.keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0)
+    return "Showing desktop, Aimz."
+
+# -------------------------------------------------------------
+# 3. HARDWARE, MARKET, WEB & MEDIA TOOLS
 # -------------------------------------------------------------
 def get_battery_status():
     battery = psutil.sensors_battery()
@@ -180,13 +234,11 @@ def open_browser():
         return f"Unable to launch browser: {str(e)}"
 
 def play_youtube_music(query: str = ""):
-    """Finds the exact track ID and starts playback immediately on YouTube Music."""
     try:
         if not query:
             webbrowser.open("https://music.youtube.com")
             return "Opening YouTube Music, Aimz."
 
-        # 1. Attempt exact track match via ytmusicapi
         if ytmusic_client:
             try:
                 results = ytmusic_client.search(query, filter="songs")
@@ -198,7 +250,6 @@ def play_youtube_music(query: str = ""):
             except Exception:
                 pass
 
-        # 2. Fallback: Direct YouTube video scrape to get instant watch URL
         encoded_query = urllib.parse.quote_plus(query)
         html = requests.get(f"https://www.youtube.com/results?search_query={encoded_query}", timeout=4).text
         video_ids = re.findall(r"watch\?v=(\S{11})", html)
@@ -207,14 +258,12 @@ def play_youtube_music(query: str = ""):
             webbrowser.open(f"https://music.youtube.com/watch?v={video_ids[0]}")
             return f"Playing {query} on YouTube Music now, Aimz."
         
-        # 3. Last fallback: Standard search page
         webbrowser.open(f"https://music.youtube.com/search?q={encoded_query}")
         return f"Searching YouTube Music for {query}, Aimz."
     except Exception as e:
         return f"Unable to play track: {str(e)}"
 
 def play_youtube_video(query: str = ""):
-    """Finds the top YouTube video and plays it immediately."""
     try:
         if not query:
             webbrowser.open("https://www.youtube.com")
@@ -345,7 +394,7 @@ def web_search(query: str):
     return "No relevant web search results found."
 
 def handle_direct_commands(text):
-    """Instantly handles hardware, media, YouTube direct play, crypto, and forex (<0.05s)."""
+    """Instantly handles apps, workstation control, hardware, media, crypto, and forex (<0.05s)."""
     clean = text.lower()
     
     # 1. Volume commands
@@ -368,19 +417,26 @@ def handle_direct_commands(text):
         if "dim" in clean:
             return set_brightness(30)
 
-    # 3. Direct YouTube Music Instant Play
+    # 3. Windows & Workstation Actions
+    if any(k in clean for k in ["lock pc", "lock workstation", "lock computer", "lock screen"]):
+        return lock_workstation()
+        
+    if any(k in clean for k in ["show desktop", "minimize all", "minimize windows", "clear screen"]):
+        return minimize_all_windows()
+
+    # 4. Direct YouTube Music Instant Play
     if any(k in clean for k in ["youtube music", "yt music"]) or (clean.startswith("play") and any(w in clean for w in ["song", "track", "music"])):
         q = re.sub(r'^(play|search for|search|open)\s+(song|track|music)?\s*', '', clean)
         q = re.sub(r'\s+(on|in)?\s*(youtube music|yt music)$', '', q).strip()
         return play_youtube_music(q)
 
-    # 4. Direct YouTube Video Instant Play
+    # 5. Direct YouTube Video Instant Play
     if "youtube" in clean or "yt" in clean or clean.startswith("play video"):
         q = re.sub(r'^(play|search for|search|look up|open)\s+(video)?\s*', '', clean)
         q = re.sub(r'\s+(on|in)?\s*(youtube|yt)$', '', q).strip()
         return play_youtube_video(q)
 
-    # 5. Media Control (Toggles current background audio in Opera GX)
+    # 6. Media Control (Toggles existing tabs in Opera GX)
     if any(k in clean for k in ["pause", "resume", "unpause"]):
         return media_control("play_pause")
     if any(w in clean for w in ["next track", "next song", "skip track", "skip song"]):
@@ -388,7 +444,7 @@ def handle_direct_commands(text):
     if any(w in clean for w in ["previous track", "previous song", "back song"]):
         return media_control("previous")
 
-    # 6. Hardware & System Specs
+    # 7. Hardware & System Telemetry
     if "battery" in clean or "power" in clean or "charge" in clean:
         return get_battery_status()
         
@@ -398,7 +454,13 @@ def handle_direct_commands(text):
     if "browser" in clean or "chrome" in clean or "google" in clean or "open internet" in clean:
         return open_browser()
 
-    # 7. Fast Crypto Spot Prices
+    # 8. App Launching triggers (e.g. "open vs code", "launch spotify", "start task manager")
+    if any(clean.startswith(prefix) for prefix in ["open ", "launch ", "start "]):
+        app_target = re.sub(r'^(open|launch|start)\s+(app|application)?\s*', '', clean).strip()
+        if app_target:
+            return launch_application(app_target)
+
+    # 9. Fast Crypto Spot Prices
     if "bitcoin" in clean or "btc" in clean:
         return get_crypto_price("bitcoin")
     if "ethereum" in clean or "eth" in clean:
@@ -408,7 +470,7 @@ def handle_direct_commands(text):
     if "ripple" in clean or "xrp" in clean:
         return get_crypto_price("ripple")
 
-    # 8. Fast Currency & Forex Lookups
+    # 10. Fast Currency & Forex Lookups
     if any(k in clean for k in ["dollar to rand", "usd to zar", "dollar rand"]):
         return get_exchange_rate("USD", "ZAR")
     if any(k in clean for k in ["euro to dollar", "eur to usd"]):
@@ -420,7 +482,7 @@ def handle_direct_commands(text):
     if any(k in clean for k in ["euro to rand", "eur to zar"]):
         return get_exchange_rate("EUR", "ZAR")
 
-    # 9. Fast Weather Lookup
+    # 11. Fast Weather Lookup
     if "weather" in clean:
         match = re.search(r'weather\s+(?:in|for)?\s*([a-zA-Z\s]+)', clean)
         loc = match.group(1).strip() if match else ""
@@ -431,7 +493,7 @@ def handle_direct_commands(text):
     return None
 
 # -------------------------------------------------------------
-# 3. MAIN EVENT LOOP
+# 4. MAIN EVENT LOOP
 # -------------------------------------------------------------
 def main():
     speak("E.V. online and operational.")
@@ -468,7 +530,7 @@ def main():
                 speak("Systems going offline. Goodbye, Aimz.")
                 break
 
-            # 1. Fast direct hardware, media & financial API path (<0.05s)
+            # 1. Fast direct actions (hardware, apps, windows, media, financial APIs) (<0.05s)
             fast_reply = handle_direct_commands(clean_input)
             if fast_reply:
                 print(f"[Fast-Path Executed]: Direct response.")
