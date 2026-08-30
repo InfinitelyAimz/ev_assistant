@@ -223,51 +223,55 @@ def open_browser():
         return f"Unable to launch browser: {str(e)}"
 
 def play_youtube_music(query: str = ""):
+    """Finds and plays the track directly or opens YouTube Music homepage."""
     try:
-        if not query:
+        clean_q = query.strip()
+        if not clean_q or clean_q in ["youtube music", "yt music", "music", "songs"]:
             webbrowser.open("https://music.youtube.com")
             return "Opening YouTube Music, Aimz."
 
         if ytmusic_client:
             try:
-                results = ytmusic_client.search(query, filter="songs")
+                results = ytmusic_client.search(clean_q, filter="songs")
                 if results and "videoId" in results[0]:
                     vid = results[0]["videoId"]
-                    title = results[0].get("title", query)
+                    title = results[0].get("title", clean_q)
                     webbrowser.open(f"https://music.youtube.com/watch?v={vid}")
                     return f"Playing {title} on YouTube Music now, Aimz."
             except Exception:
                 pass
 
-        encoded_query = urllib.parse.quote_plus(query)
+        encoded_query = urllib.parse.quote_plus(clean_q)
         html = requests.get(f"https://www.youtube.com/results?search_query={encoded_query}", timeout=4).text
         video_ids = re.findall(r"watch\?v=(\S{11})", html)
         
         if video_ids:
             webbrowser.open(f"https://music.youtube.com/watch?v={video_ids[0]}")
-            return f"Playing {query} on YouTube Music now, Aimz."
+            return f"Playing {clean_q} on YouTube Music now, Aimz."
         
         webbrowser.open(f"https://music.youtube.com/search?q={encoded_query}")
-        return f"Searching YouTube Music for {query}, Aimz."
+        return f"Searching YouTube Music for {clean_q}, Aimz."
     except Exception as e:
         return f"Unable to play track: {str(e)}"
 
 def play_youtube_video(query: str = ""):
+    """Finds and plays the video directly or opens YouTube homepage."""
     try:
-        if not query:
+        clean_q = query.strip()
+        if not clean_q or clean_q in ["youtube", "yt", "videos"]:
             webbrowser.open("https://www.youtube.com")
             return "Opening YouTube, Aimz."
 
-        encoded_query = urllib.parse.quote_plus(query)
+        encoded_query = urllib.parse.quote_plus(clean_q)
         html = requests.get(f"https://www.youtube.com/results?search_query={encoded_query}", timeout=4).text
         video_ids = re.findall(r"watch\?v=(\S{11})", html)
         
         if video_ids:
             webbrowser.open(f"https://www.youtube.com/watch?v={video_ids[0]}")
-            return f"Playing video for {query} on YouTube, Aimz."
+            return f"Playing video for {clean_q} on YouTube, Aimz."
         
         webbrowser.open(f"https://www.youtube.com/results?search_query={encoded_query}")
-        return f"Searching YouTube for {query}, Aimz."
+        return f"Searching YouTube for {clean_q}, Aimz."
     except Exception as e:
         return f"Unable to launch YouTube video: {str(e)}"
 
@@ -380,6 +384,7 @@ def web_search(query: str):
 def handle_direct_commands(text):
     clean = text.lower()
     
+    # 1. Volume commands
     if "volume" in clean or "sound" in clean:
         nums = re.findall(r'\b\d+\b', clean)
         if nums:
@@ -389,6 +394,7 @@ def handle_direct_commands(text):
         if "max" in clean or "full" in clean:
             return set_volume_level(100)
 
+    # 2. Brightness commands
     if "brightness" in clean or "dim" in clean:
         nums = re.findall(r'\b\d+\b', clean)
         if nums:
@@ -398,22 +404,14 @@ def handle_direct_commands(text):
         if "dim" in clean:
             return set_brightness(30)
 
+    # 3. Workstation & System Controls
     if any(k in clean for k in ["lock pc", "lock workstation", "lock computer", "lock screen"]):
         return lock_workstation()
         
     if any(k in clean for k in ["show desktop", "minimize all", "minimize windows", "clear screen"]):
         return minimize_all_windows()
 
-    if any(k in clean for k in ["youtube music", "yt music"]) or (clean.startswith("play") and any(w in clean for w in ["song", "track", "music"])):
-        q = re.sub(r'^(play|search for|search|open)\s+(song|track|music)?\s*', '', clean)
-        q = re.sub(r'\s+(on|in)?\s*(youtube music|yt music)$', '', q).strip()
-        return play_youtube_music(q)
-
-    if "youtube" in clean or "yt" in clean or clean.startswith("play video"):
-        q = re.sub(r'^(play|search for|search|look up|open)\s+(video)?\s*', '', clean)
-        q = re.sub(r'\s+(on|in)?\s*(youtube|yt)$', '', q).strip()
-        return play_youtube_video(q)
-
+    # 4. Media Controls (Playback Toggles)
     if any(k in clean for k in ["pause", "resume", "unpause"]):
         return media_control("play_pause")
     if any(w in clean for w in ["next track", "next song", "skip track", "skip song"]):
@@ -421,6 +419,19 @@ def handle_direct_commands(text):
     if any(w in clean for w in ["previous track", "previous song", "back song"]):
         return media_control("previous")
 
+    # 5. YouTube Music Searches & Launch
+    if any(k in clean for k in ["youtube music", "yt music"]) or (clean.startswith("play") and any(w in clean for w in ["song", "track", "music"])):
+        q = re.sub(r'^(play|search for|search|open)\s+(song|track|music)?\s*', '', clean)
+        q = re.sub(r'\s+(on|in)?\s*(youtube music|yt music)$', '', q).strip()
+        return play_youtube_music(q)
+
+    # 6. YouTube Video Searches & Launch
+    if "youtube" in clean or "yt" in clean or clean.startswith("play video"):
+        q = re.sub(r'^(play|search for|search|look up|open)\s+(video)?\s*', '', clean)
+        q = re.sub(r'\s+(on|in)?\s*(youtube|yt)$', '', q).strip()
+        return play_youtube_video(q)
+
+    # 7. Hardware & System Telemetry
     if "battery" in clean or "power" in clean or "charge" in clean:
         return get_battery_status()
         
@@ -430,11 +441,13 @@ def handle_direct_commands(text):
     if "browser" in clean or "chrome" in clean or "google" in clean or "open internet" in clean:
         return open_browser()
 
+    # 8. App Launching triggers
     if any(clean.startswith(prefix) for prefix in ["open ", "launch ", "start "]):
         app_target = re.sub(r'^(open|launch|start)\s+(app|application)?\s*', '', clean).strip()
         if app_target:
             return launch_application(app_target)
 
+    # 9. Fast Crypto Spot Prices
     if "bitcoin" in clean or "btc" in clean:
         return get_crypto_price("bitcoin")
     if "ethereum" in clean or "eth" in clean:
@@ -444,6 +457,7 @@ def handle_direct_commands(text):
     if "ripple" in clean or "xrp" in clean:
         return get_crypto_price("ripple")
 
+    # 10. Fast Currency & Forex Lookups
     if any(k in clean for k in ["dollar to rand", "usd to zar", "dollar rand"]):
         return get_exchange_rate("USD", "ZAR")
     if any(k in clean for k in ["euro to dollar", "eur to usd"]):
@@ -455,6 +469,7 @@ def handle_direct_commands(text):
     if any(k in clean for k in ["euro to rand", "eur to zar"]):
         return get_exchange_rate("EUR", "ZAR")
 
+    # 11. Fast Weather Lookup
     if "weather" in clean:
         match = re.search(r'weather\s+(?:in|for)?\s*([a-zA-Z\s]+)', clean)
         loc = match.group(1).strip() if match else ""
