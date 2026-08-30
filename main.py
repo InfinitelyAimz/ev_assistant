@@ -8,6 +8,7 @@ import webbrowser
 import subprocess
 import time
 import ctypes
+import math
 import warnings
 
 # Suppress deprecation and cache warnings
@@ -31,10 +32,13 @@ from pycaw.pycaw import AudioUtilities
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, 
-    QHBoxLayout, QLabel, QFrame
+    QHBoxLayout, QLabel, QFrame, QPushButton, QProgressBar
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPoint
-from PyQt6.QtGui import QColor, QFont, QPainter, QBrush, QPen, QRadialGradient
+from PyQt6.QtGui import (
+    QColor, QFont, QPainter, QBrush, QPen, QRadialGradient, 
+    QLinearGradient, QPolygonF
+)
 
 try:
     from ddgs import DDGS
@@ -47,6 +51,9 @@ try:
 except Exception:
     ytmusic_client = None
 
+# Global audio visualizer energy levels
+CURRENT_MIC_RMS = 0.0
+
 # -------------------------------------------------------------
 # 1. VOICE ENGINE (PIPER TTS & WHISPER STT)
 # -------------------------------------------------------------
@@ -56,8 +63,9 @@ voice_model = os.path.join(piper_dir, "jarvis-medium.onnx")
 json_config = os.path.join(piper_dir, "jarvis-medium.onnx.json")
 temp_wav_path = os.path.join(BASE_DIR, "temp_input.wav")
 
-def speak(text):
-    """Synthesizes and plays audio directly out loud."""
+def speak(text, worker_ref=None):
+    """Synthesizes audio with dynamic visualizer energy streaming."""
+    global CURRENT_MIC_RMS
     if not text or not text.strip():
         return
 
@@ -76,13 +84,21 @@ def speak(text):
 
             if raw_pcm_data and len(raw_pcm_data) > 0:
                 audio_array = np.frombuffer(raw_pcm_data, dtype=np.int16)
+                
+                # Start non-blocking playback while driving visualizer
                 sd.play(audio_array, samplerate=16000)
+                chunk_len = 1024
+                for i in range(0, len(audio_array), chunk_len):
+                    chunk = audio_array[i:i+chunk_len]
+                    if len(chunk) > 0:
+                        CURRENT_MIC_RMS = float(np.sqrt(np.mean(chunk.astype(np.float32)**2)))
+                    sd.sleep(int((len(chunk) / 16000) * 1000))
                 sd.wait()
+                CURRENT_MIC_RMS = 0.0
                 return
         except Exception as e:
             print(f"[Piper Execution Error]: {e}")
 
-    # Fallback to standard SAPI5
     try:
         import pyttsx3
         engine = pyttsx3.init('sapi5')
@@ -109,6 +125,7 @@ WHISPER_PROMPT = (
 )
 
 def listen(silence_limit=0.6, threshold=450):
+    global CURRENT_MIC_RMS
     sample_rate = 16000
     chunk_size = 1024
     
@@ -123,6 +140,7 @@ def listen(silence_limit=0.6, threshold=450):
             audio_chunks.append(data.copy())
             
             rms = np.sqrt(np.mean(data.astype(np.float32)**2))
+            CURRENT_MIC_RMS = float(rms)
             
             if rms > threshold:
                 has_spoken = True
@@ -133,8 +151,10 @@ def listen(silence_limit=0.6, threshold=450):
                     break
             
             if len(audio_chunks) > int(4.5 * (sample_rate / chunk_size)) and not has_spoken:
+                CURRENT_MIC_RMS = 0.0
                 return ""
 
+    CURRENT_MIC_RMS = 0.0
     if not has_spoken or not audio_chunks:
         return ""
 
@@ -223,7 +243,6 @@ def open_browser():
         return f"Unable to launch browser: {str(e)}"
 
 def play_youtube_music(query: str = ""):
-    """Finds and plays the track directly or opens YouTube Music homepage."""
     try:
         clean_q = query.strip()
         if not clean_q or clean_q in ["youtube music", "yt music", "music", "songs"]:
@@ -244,7 +263,6 @@ def play_youtube_music(query: str = ""):
         encoded_query = urllib.parse.quote_plus(clean_q)
         html = requests.get(f"https://www.youtube.com/results?search_query={encoded_query}", timeout=4).text
         video_ids = re.findall(r"watch\?v=(\S{11})", html)
-        
         if video_ids:
             webbrowser.open(f"https://music.youtube.com/watch?v={video_ids[0]}")
             return f"Playing {clean_q} on YouTube Music now, Aimz."
@@ -255,7 +273,6 @@ def play_youtube_music(query: str = ""):
         return f"Unable to play track: {str(e)}"
 
 def play_youtube_video(query: str = ""):
-    """Finds and plays the video directly or opens YouTube homepage."""
     try:
         clean_q = query.strip()
         if not clean_q or clean_q in ["youtube", "yt", "videos"]:
@@ -265,7 +282,6 @@ def play_youtube_video(query: str = ""):
         encoded_query = urllib.parse.quote_plus(clean_q)
         html = requests.get(f"https://www.youtube.com/results?search_query={encoded_query}", timeout=4).text
         video_ids = re.findall(r"watch\?v=(\S{11})", html)
-        
         if video_ids:
             webbrowser.open(f"https://www.youtube.com/watch?v={video_ids[0]}")
             return f"Playing video for {clean_q} on YouTube, Aimz."
@@ -384,7 +400,6 @@ def web_search(query: str):
 def handle_direct_commands(text):
     clean = text.lower()
     
-    # 1. Volume commands
     if "volume" in clean or "sound" in clean:
         nums = re.findall(r'\b\d+\b', clean)
         if nums:
@@ -394,7 +409,6 @@ def handle_direct_commands(text):
         if "max" in clean or "full" in clean:
             return set_volume_level(100)
 
-    # 2. Brightness commands
     if "brightness" in clean or "dim" in clean:
         nums = re.findall(r'\b\d+\b', clean)
         if nums:
@@ -404,14 +418,12 @@ def handle_direct_commands(text):
         if "dim" in clean:
             return set_brightness(30)
 
-    # 3. Workstation & System Controls
     if any(k in clean for k in ["lock pc", "lock workstation", "lock computer", "lock screen"]):
         return lock_workstation()
         
     if any(k in clean for k in ["show desktop", "minimize all", "minimize windows", "clear screen"]):
         return minimize_all_windows()
 
-    # 4. Media Controls (Playback Toggles)
     if any(k in clean for k in ["pause", "resume", "unpause"]):
         return media_control("play_pause")
     if any(w in clean for w in ["next track", "next song", "skip track", "skip song"]):
@@ -419,19 +431,16 @@ def handle_direct_commands(text):
     if any(w in clean for w in ["previous track", "previous song", "back song"]):
         return media_control("previous")
 
-    # 5. YouTube Music Searches & Launch
     if any(k in clean for k in ["youtube music", "yt music"]) or (clean.startswith("play") and any(w in clean for w in ["song", "track", "music"])):
         q = re.sub(r'^(play|search for|search|open)\s+(song|track|music)?\s*', '', clean)
         q = re.sub(r'\s+(on|in)?\s*(youtube music|yt music)$', '', q).strip()
         return play_youtube_music(q)
 
-    # 6. YouTube Video Searches & Launch
     if "youtube" in clean or "yt" in clean or clean.startswith("play video"):
         q = re.sub(r'^(play|search for|search|look up|open)\s+(video)?\s*', '', clean)
         q = re.sub(r'\s+(on|in)?\s*(youtube|yt)$', '', q).strip()
         return play_youtube_video(q)
 
-    # 7. Hardware & System Telemetry
     if "battery" in clean or "power" in clean or "charge" in clean:
         return get_battery_status()
         
@@ -441,13 +450,11 @@ def handle_direct_commands(text):
     if "browser" in clean or "chrome" in clean or "google" in clean or "open internet" in clean:
         return open_browser()
 
-    # 8. App Launching triggers
     if any(clean.startswith(prefix) for prefix in ["open ", "launch ", "start "]):
         app_target = re.sub(r'^(open|launch|start)\s+(app|application)?\s*', '', clean).strip()
         if app_target:
             return launch_application(app_target)
 
-    # 9. Fast Crypto Spot Prices
     if "bitcoin" in clean or "btc" in clean:
         return get_crypto_price("bitcoin")
     if "ethereum" in clean or "eth" in clean:
@@ -457,7 +464,6 @@ def handle_direct_commands(text):
     if "ripple" in clean or "xrp" in clean:
         return get_crypto_price("ripple")
 
-    # 10. Fast Currency & Forex Lookups
     if any(k in clean for k in ["dollar to rand", "usd to zar", "dollar rand"]):
         return get_exchange_rate("USD", "ZAR")
     if any(k in clean for k in ["euro to dollar", "eur to usd"]):
@@ -469,7 +475,6 @@ def handle_direct_commands(text):
     if any(k in clean for k in ["euro to rand", "eur to zar"]):
         return get_exchange_rate("EUR", "ZAR")
 
-    # 11. Fast Weather Lookup
     if "weather" in clean:
         match = re.search(r'weather\s+(?:in|for)?\s*([a-zA-Z\s]+)', clean)
         loc = match.group(1).strip() if match else ""
@@ -483,17 +488,19 @@ def handle_direct_commands(text):
 # 3. BACKGROUND ASSISTANT THREAD
 # -------------------------------------------------------------
 class AssistantWorker(QThread):
-    status_changed = pyqtSignal(str)     # "STANDBY", "LISTENING", "PROCESSING", "SPEAKING"
+    status_changed = pyqtSignal(str)
     user_speech_detected = pyqtSignal(str)
     ai_response_generated = pyqtSignal(str)
 
     def __init__(self):
         super().__init__()
         self.is_running = True
+        self.is_muted = False
 
     def run(self):
         self.status_changed.emit("SPEAKING")
-        speak("E.V. visual interface online and operational.")
+        self.ai_response_generated.emit("Visual interface initialized. All systems nominal.")
+        speak("Visual interface initialized. All systems nominal.", self)
         self.status_changed.emit("STANDBY")
 
         system_prompt = {
@@ -514,6 +521,10 @@ class AssistantWorker(QThread):
 
         while self.is_running:
             try:
+                if self.is_muted:
+                    time.sleep(0.2)
+                    continue
+
                 self.status_changed.emit("LISTENING")
                 user_input = listen(silence_limit=0.6, threshold=450)
 
@@ -527,7 +538,7 @@ class AssistantWorker(QThread):
                 if any(w in clean_input for w in ["shutdown", "shut down", "goodbye", "exit", "stop"]):
                     self.status_changed.emit("SPEAKING")
                     self.ai_response_generated.emit("Systems going offline. Goodbye, Aimz.")
-                    speak("Systems going offline. Goodbye, Aimz.")
+                    speak("Systems going offline. Goodbye, Aimz.", self)
                     self.is_running = False
                     break
 
@@ -539,7 +550,7 @@ class AssistantWorker(QThread):
                     self.ai_response_generated.emit(fast_reply)
                     messages.append({"role": "user", "content": user_input})
                     messages.append({"role": "assistant", "content": fast_reply})
-                    speak(fast_reply)
+                    speak(fast_reply, self)
                     self.status_changed.emit("STANDBY")
                     continue
 
@@ -562,7 +573,7 @@ class AssistantWorker(QThread):
                 self.status_changed.emit("SPEAKING")
                 self.ai_response_generated.emit(reply)
                 messages.append({"role": "assistant", "content": reply})
-                speak(reply)
+                speak(reply, self)
                 self.status_changed.emit("STANDBY")
 
             except Exception as e:
@@ -570,154 +581,259 @@ class AssistantWorker(QThread):
                 self.status_changed.emit("STANDBY")
 
 # -------------------------------------------------------------
-# 4. PYQT6 HUD WIDGET & VISUAL DASHBOARD
+# 4. ADVANCED HOLOGRAPHIC & AUDIO VISUALIZER CORE
 # -------------------------------------------------------------
-class ArcReactorWidget(QWidget):
-    """Futuristic glowing circular Arc Reactor core with state animations."""
+class HolographicArcReactor(QWidget):
+    """Futuristic Arc Reactor with dynamic live waveform audio reactivity."""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(160, 160)
+        self.setFixedSize(200, 200)
         self.angle = 0
         self.state = "STANDBY"
+        self.bars = 32
+        self.audio_levels = [0.0] * self.bars
         
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_animation)
-        self.timer.start(30)
+        self.timer.timeout.connect(self.update_frame)
+        self.timer.start(25)
 
     def set_state(self, state):
         self.state = state
-        self.update()
 
-    def update_animation(self):
-        self.angle = (self.angle + (4 if self.state == "PROCESSING" else 1.5)) % 360
+    def update_frame(self):
+        global CURRENT_MIC_RMS
+        self.angle = (self.angle + (5.0 if self.state == "PROCESSING" else 1.2)) % 360
+        
+        # Scale RMS into normalized amplitude range
+        target_amp = min(1.0, CURRENT_MIC_RMS / 2500.0)
+        if self.state in ["LISTENING", "SPEAKING"]:
+            target_amp = max(0.15, target_amp)
+        else:
+            target_amp = 0.05
+
+        # Smooth waveform decay & wave shift
+        for i in range(self.bars):
+            variation = math.sin((self.angle * 0.05) + (i * 0.4)) * 0.25
+            val = max(0.05, target_amp + variation)
+            self.audio_levels[i] += (val - self.audio_levels[i]) * 0.35
+            
         self.update()
 
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
 
-        center_x, center_y = self.width() / 2, self.height() / 2
+        cx, cy = self.width() / 2, self.height() / 2
 
-        # State color palettes
+        # State palettes
         colors = {
-            "STANDBY": (QColor(0, 210, 255, 180), QColor(0, 210, 255, 30)),
-            "LISTENING": (QColor(0, 255, 170, 230), QColor(0, 255, 170, 60)),
-            "PROCESSING": (QColor(255, 190, 0, 230), QColor(255, 190, 0, 60)),
-            "SPEAKING": (QColor(0, 150, 255, 255), QColor(0, 150, 255, 80))
+            "STANDBY": (QColor(0, 210, 255), QColor(0, 210, 255, 30)),
+            "LISTENING": (QColor(0, 255, 170), QColor(0, 255, 170, 70)),
+            "PROCESSING": (QColor(255, 190, 0), QColor(255, 190, 0, 70)),
+            "SPEAKING": (QColor(0, 160, 255), QColor(0, 160, 255, 80))
         }
-        primary_color, glow_color = colors.get(self.state, colors["STANDBY"])
+        primary, glow = colors.get(self.state, colors["STANDBY"])
 
-        # Outer Glow
-        gradient = QRadialGradient(center_x, center_y, 75)
-        gradient.setColorAt(0.0, glow_color)
-        gradient.setColorAt(1.0, QColor(0, 0, 0, 0))
-        painter.setBrush(QBrush(gradient))
+        # 1. Holographic Outer Radial Glow
+        grad = QRadialGradient(cx, cy, 95)
+        grad.setColorAt(0.0, glow)
+        grad.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.setBrush(QBrush(grad))
         painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(5, 5, 150, 150)
+        painter.drawEllipse(0, 0, self.width(), self.height())
 
-        # Outer Rotating Ring
-        pen = QPen(primary_color, 2, Qt.PenStyle.DashLine)
+        # 2. Live Radial Audio Visualizer Bars
+        painter.save()
+        painter.translate(cx, cy)
+        radius = 58
+        for i in range(self.bars):
+            rot = (360.0 / self.bars) * i + self.angle * 0.5
+            painter.save()
+            painter.rotate(rot)
+            bar_len = 5 + (self.audio_levels[i] * 32)
+            
+            pen = QPen(primary, 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+            painter.setPen(pen)
+            painter.drawLine(0, int(radius), 0, int(radius + bar_len))
+            painter.restore()
+        painter.restore()
+
+        # 3. Concentric Orbit Rings
+        pen = QPen(primary, 1.5, Qt.PenStyle.DashLine)
         painter.setPen(pen)
-        painter.drawArc(18, 18, 124, 124, int(self.angle * 16), 180 * 16)
-        painter.drawArc(18, 18, 124, 124, int((self.angle + 180) * 16), 90 * 16)
+        painter.drawArc(int(cx - 52), int(cy - 52), 104, 104, int(self.angle * 16), 120 * 16)
+        painter.drawArc(int(cx - 52), int(cy - 52), 104, 104, int((self.angle + 180) * 16), 120 * 16)
 
-        # Inner Solid Ring
-        pen = QPen(primary_color, 1.5, Qt.PenStyle.SolidLine)
-        painter.setPen(pen)
-        painter.drawEllipse(34, 34, 92, 92)
-
-        # Central Core
-        core_grad = QRadialGradient(center_x, center_y, 30)
-        core_grad.setColorAt(0.0, QColor(255, 255, 255, 240))
-        core_grad.setColorAt(0.5, primary_color)
-        core_grad.setColorAt(1.0, QColor(0, 0, 0, 150))
+        # 4. Central Solid Reactor Core
+        core_grad = QRadialGradient(cx, cy, 28)
+        core_grad.setColorAt(0.0, QColor(255, 255, 255, 250))
+        core_grad.setColorAt(0.5, primary)
+        core_grad.setColorAt(1.0, QColor(6, 14, 24, 200))
         painter.setBrush(QBrush(core_grad))
-        painter.setPen(QPen(primary_color, 1))
-        painter.drawEllipse(48, 48, 64, 64)
+        painter.setPen(QPen(primary, 1.2))
+        painter.drawEllipse(int(cx - 26), int(cy - 26), 52, 52)
 
 
 class JarvisHUD(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("E.V. Neural Interface")
-        self.setFixedSize(560, 480)
+        self.setFixedSize(580, 560)
         
-        # Transparent Frameless Window
+        # Transparent Frameless Holographic Window
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         self.drag_position = QPoint()
+        self.is_compact = False
+        
+        # Streaming text animation state
+        self.typing_target_text = ""
+        self.typing_index = 0
+        self.typing_timer = QTimer(self)
+        self.typing_timer.timeout.connect(self.stream_text_character)
+
         self.init_ui()
 
         # Start Background Voice Thread
         self.worker = AssistantWorker()
         self.worker.status_changed.connect(self.update_status)
         self.worker.user_speech_detected.connect(self.update_user_text)
-        self.worker.ai_response_generated.connect(self.update_ai_text)
+        self.worker.ai_response_generated.connect(self.trigger_ai_typing)
         self.worker.start()
 
         # Telemetry Timer
         self.stats_timer = QTimer(self)
         self.stats_timer.timeout.connect(self.update_telemetry)
-        self.stats_timer.start(2000)
+        self.stats_timer.start(1000)
         self.update_telemetry()
 
     def init_ui(self):
-        main_widget = QWidget(self)
-        main_widget.setObjectName("Container")
-        main_widget.setStyleSheet("""
+        self.main_container = QWidget(self)
+        self.main_container.setObjectName("Container")
+        self.main_container.setStyleSheet("""
             QWidget#Container {
-                background-color: rgba(10, 16, 26, 0.92);
-                border: 1.5px solid rgba(0, 210, 255, 0.4);
-                border-radius: 18px;
+                background-color: rgba(6, 12, 20, 0.94);
+                border: 1.5px solid rgba(0, 210, 255, 0.5);
+                border-radius: 20px;
+            }
+            QLabel {
+                font-family: 'Consolas', 'Segoe UI';
+            }
+            QProgressBar {
+                border: 1px solid rgba(0, 210, 255, 0.3);
+                border-radius: 4px;
+                background-color: rgba(10, 20, 32, 0.8);
+                text-align: center;
+                color: #00d2ff;
+                font-size: 10px;
+                font-family: 'Consolas';
+                font-weight: bold;
+            }
+            QProgressBar::chunk {
+                background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0066aa, stop:1 #00f0ff);
+                border-radius: 3px;
             }
         """)
 
-        layout = QVBoxLayout(main_widget)
-        layout.setContentsMargins(25, 20, 25, 20)
-        layout.setSpacing(12)
+        layout = QVBoxLayout(self.main_container)
+        layout.setContentsMargins(22, 18, 22, 18)
+        layout.setSpacing(10)
 
-        # Top Bar: Title & Close
+        # 1. Top Bar: Hologram Header & Control Buttons
         top_bar = QHBoxLayout()
-        title_label = QLabel("E.V. SYSTEM HUD // MARK-IV")
+        title_label = QLabel("E.V. NEURAL HUD // MARK-V")
         title_label.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
-        title_label.setStyleSheet("color: #00d2ff; letter-spacing: 2px;")
+        title_label.setStyleSheet("color: #00f0ff; letter-spacing: 2px;")
         
-        close_btn = QLabel("✕")
-        close_btn.setFont(QFont("Consolas", 12, QFont.Weight.Bold))
-        close_btn.setStyleSheet("color: #667788; cursor: pointer;")
-        close_btn.mousePressEvent = lambda e: self.close_application()
+        btn_compact = QPushButton("▫")
+        btn_compact.setToolTip("Toggle Compact Mode")
+        btn_compact.setFixedSize(26, 26)
+        btn_compact.setStyleSheet("QPushButton { color: #00d2ff; background: rgba(0,210,255,0.1); border: 1px solid rgba(0,210,255,0.4); border-radius: 13px; font-weight: bold; } QPushButton:hover { background: rgba(0,210,255,0.3); }")
+        btn_compact.clicked.connect(self.toggle_compact_mode)
+
+        btn_close = QPushButton("✕")
+        btn_close.setToolTip("Shutdown Assistant")
+        btn_close.setFixedSize(26, 26)
+        btn_close.setStyleSheet("QPushButton { color: #ff5566; background: rgba(255,85,102,0.1); border: 1px solid rgba(255,85,102,0.4); border-radius: 13px; font-weight: bold; } QPushButton:hover { background: rgba(255,85,102,0.3); }")
+        btn_close.clicked.connect(self.close_application)
 
         top_bar.addWidget(title_label)
         top_bar.addStretch()
-        top_bar.addWidget(close_btn)
+        top_bar.addWidget(btn_compact)
+        top_bar.addWidget(btn_close)
         layout.addLayout(top_bar)
 
-        # Center: Arc Reactor & Status
-        center_layout = QVBoxLayout()
+        # 2. Holographic Center Core
+        self.center_widget = QWidget()
+        center_layout = QVBoxLayout(self.center_widget)
+        center_layout.setContentsMargins(0, 0, 0, 0)
+        center_layout.setSpacing(6)
         center_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        self.reactor = ArcReactorWidget()
+        self.reactor = HolographicArcReactor()
         center_layout.addWidget(self.reactor, alignment=Qt.AlignmentFlag.AlignCenter)
 
         self.status_label = QLabel("SYSTEM STANDBY")
         self.status_label.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
         self.status_label.setStyleSheet("color: #00d2ff; letter-spacing: 3px;")
         center_layout.addWidget(self.status_label, alignment=Qt.AlignmentFlag.AlignCenter)
-        layout.addLayout(center_layout)
+        layout.addWidget(self.center_widget)
 
-        # Dialogue Section
-        dialogue_frame = QFrame()
-        dialogue_frame.setStyleSheet("""
+        # 3. Interactive Quick-Control Action Dock
+        self.dock_layout = QHBoxLayout()
+        self.dock_layout.setSpacing(8)
+
+        btn_style = """
+            QPushButton {
+                background: rgba(0, 210, 255, 0.08);
+                border: 1px solid rgba(0, 210, 255, 0.3);
+                border-radius: 6px;
+                color: #a0c4e2;
+                font-size: 10px;
+                font-family: 'Consolas';
+                font-weight: bold;
+                padding: 5px 8px;
+            }
+            QPushButton:hover {
+                background: rgba(0, 210, 255, 0.25);
+                color: #ffffff;
+            }
+        """
+        self.btn_mute = QPushButton("🎙 MUTE")
+        self.btn_mute.setStyleSheet(btn_style)
+        self.btn_mute.clicked.connect(self.toggle_mute)
+
+        btn_clear = QPushButton("⟲ CLEAR")
+        btn_clear.setStyleSheet(btn_style)
+        btn_clear.clicked.connect(self.clear_transcript)
+
+        btn_play = QPushButton("⏯ MEDIA")
+        btn_play.setStyleSheet(btn_style)
+        btn_play.clicked.connect(lambda: media_control("play_pause"))
+
+        btn_desk = QPushButton("⛶ DESKTOP")
+        btn_desk.setStyleSheet(btn_style)
+        btn_desk.clicked.connect(minimize_all_windows)
+
+        self.dock_layout.addWidget(self.btn_mute)
+        self.dock_layout.addWidget(btn_clear)
+        self.dock_layout.addWidget(btn_play)
+        self.dock_layout.addWidget(btn_desk)
+        layout.addLayout(self.dock_layout)
+
+        # 4. Terminal Transcripts (Streaming text)
+        self.dialogue_frame = QFrame()
+        self.dialogue_frame.setStyleSheet("""
             QFrame {
-                background-color: rgba(4, 8, 14, 0.7);
-                border: 1px solid rgba(0, 210, 255, 0.18);
-                border-radius: 10px;
-                padding: 6px;
+                background-color: rgba(3, 8, 14, 0.85);
+                border: 1px solid rgba(0, 210, 255, 0.25);
+                border-radius: 8px;
+                padding: 8px;
             }
         """)
-        d_layout = QVBoxLayout(dialogue_frame)
-        d_layout.setSpacing(6)
+        d_layout = QVBoxLayout(self.dialogue_frame)
+        d_layout.setSpacing(4)
 
         self.user_label = QLabel("Aimz: [Awaiting Input...]")
         self.user_label.setFont(QFont("Segoe UI", 9))
@@ -731,17 +847,57 @@ class JarvisHUD(QMainWindow):
 
         d_layout.addWidget(self.user_label)
         d_layout.addWidget(self.ai_label)
-        layout.addWidget(dialogue_frame)
+        layout.addWidget(self.dialogue_frame)
 
-        # Bottom Bar: Live Telemetry
-        self.telemetry_label = QLabel("CPU: 0% | RAM: 0GB | BATTERY: 100%")
-        self.telemetry_label.setFont(QFont("Consolas", 8))
-        self.telemetry_label.setStyleSheet("color: #4c687e;")
-        self.telemetry_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.telemetry_label)
+        # 5. System Resource Progress Bars
+        self.telemetry_widget = QWidget()
+        t_layout = QHBoxLayout(self.telemetry_widget)
+        t_layout.setContentsMargins(0, 2, 0, 2)
+        t_layout.setSpacing(8)
 
-        self.setCentralWidget(main_widget)
+        # CPU Progress
+        cpu_box = QVBoxLayout()
+        cpu_box.setSpacing(2)
+        lbl_cpu = QLabel("CPU LOAD")
+        lbl_cpu.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        lbl_cpu.setStyleSheet("color: #00d2ff;")
+        self.bar_cpu = QProgressBar()
+        self.bar_cpu.setFixedHeight(14)
+        cpu_box.addWidget(lbl_cpu)
+        cpu_box.addWidget(self.bar_cpu)
 
+        # RAM Progress
+        ram_box = QVBoxLayout()
+        ram_box.setSpacing(2)
+        lbl_ram = QLabel("RAM USAGE")
+        lbl_ram.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        lbl_ram.setStyleSheet("color: #00d2ff;")
+        self.bar_ram = QProgressBar()
+        self.bar_ram.setFixedHeight(14)
+        ram_box.addWidget(lbl_ram)
+        ram_box.addWidget(self.bar_ram)
+
+        # Battery Progress
+        bat_box = QVBoxLayout()
+        bat_box.setSpacing(2)
+        lbl_bat = QLabel("BATTERY")
+        lbl_bat.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        lbl_bat.setStyleSheet("color: #00d2ff;")
+        self.bar_bat = QProgressBar()
+        self.bar_bat.setFixedHeight(14)
+        bat_box.addWidget(lbl_bat)
+        bat_box.addWidget(self.bar_bat)
+
+        t_layout.addLayout(cpu_box)
+        t_layout.addLayout(ram_box)
+        t_layout.addLayout(bat_box)
+        layout.addWidget(self.telemetry_widget)
+
+        self.setCentralWidget(self.main_container)
+
+    # ---------------------------------------------------------
+    # HUD Controller Methods
+    # ---------------------------------------------------------
     def update_status(self, status):
         self.status_label.setText(f"SYSTEM {status}")
         self.reactor.set_state(status)
@@ -749,18 +905,91 @@ class JarvisHUD(QMainWindow):
     def update_user_text(self, text):
         self.user_label.setText(f"Aimz: {text}")
 
-    def update_ai_text(self, text):
-        self.ai_label.setText(f"E.V.: {text}")
+    def trigger_ai_typing(self, text):
+        self.typing_target_text = text
+        self.typing_index = 0
+        self.ai_label.setText("E.V.: ")
+        self.typing_timer.start(18)
+
+    def stream_text_character(self):
+        if self.typing_index < len(self.typing_target_text):
+            current = self.ai_label.text() + self.typing_target_text[self.typing_index]
+            self.ai_label.setText(current)
+            self.typing_index += 1
+        else:
+            self.typing_timer.stop()
 
     def update_telemetry(self):
-        cpu = psutil.cpu_percent()
+        cpu = int(psutil.cpu_percent())
+        self.bar_cpu.setValue(cpu)
+        self.bar_cpu.setFormat(f"{cpu}%")
+
         ram = psutil.virtual_memory()
-        used_ram = round(ram.used / (1024**3), 1)
-        total_ram = round(ram.total / (1024**3), 1)
-        
+        self.bar_ram.setValue(int(ram.percent))
+        used_gb = round(ram.used / (1024**3), 1)
+        self.bar_ram.setFormat(f"{used_gb}G ({int(ram.percent)}%)")
+
         battery = psutil.sensors_battery()
-        bat_str = f"{battery.percent}%" if battery else "AC"
-        self.telemetry_label.setText(f"CPU: {cpu}%  |  RAM: {used_ram}/{total_ram} GB  |  BATTERY: {bat_str}")
+        if battery:
+            self.bar_bat.setValue(int(battery.percent))
+            self.bar_bat.setFormat(f"{battery.percent}%")
+        else:
+            self.bar_bat.setValue(100)
+            self.bar_bat.setFormat("AC PWR")
+
+    def toggle_mute(self):
+        self.worker.is_muted = not self.worker.is_muted
+        if self.worker.is_muted:
+            self.btn_mute.setText("🔇 UNMUTE")
+            self.btn_mute.setStyleSheet("QPushButton { background: rgba(255, 85, 102, 0.25); border: 1px solid #ff5566; color: #ffffff; border-radius: 6px; font-size: 10px; font-weight: bold; padding: 5px 8px; }")
+            self.update_status("MUTED")
+        else:
+            self.btn_mute.setText("🎙 MUTE")
+            self.btn_mute.setStyleSheet("QPushButton { background: rgba(0, 210, 255, 0.08); border: 1px solid rgba(0, 210, 255, 0.3); border-radius: 6px; color: #a0c4e2; font-size: 10px; font-weight: bold; padding: 5px 8px; }")
+            self.update_status("STANDBY")
+
+    def clear_transcript(self):
+        self.user_label.setText("Aimz: [Awaiting Input...]")
+        self.ai_label.setText("E.V.: Ready for command.")
+
+    def toggle_compact_mode(self):
+        self.is_compact = not self.is_compact
+        if self.is_compact:
+            self.dialogue_frame.hide()
+            self.telemetry_widget.hide()
+            self.setFixedSize(300, 310)
+        else:
+            self.dialogue_frame.show()
+            self.telemetry_widget.show()
+            self.setFixedSize(580, 560)
+
+    # Holographic Border Targeting Reticle Corner Painter
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        
+        pen = QPen(QColor(0, 240, 255, 200), 2)
+        painter.setPen(pen)
+
+        w = self.width()
+        h = self.height()
+        corner_len = 16
+
+        # Top-Left Reticle
+        painter.drawLine(10, 10 + corner_len, 10, 10)
+        painter.drawLine(10, 10, 10 + corner_len, 10)
+
+        # Top-Right Reticle
+        painter.drawLine(w - 10 - corner_len, 10, w - 10, 10)
+        painter.drawLine(w - 10, 10, w - 10, 10 + corner_len)
+
+        # Bottom-Left Reticle
+        painter.drawLine(10, h - 10 - corner_len, 10, h - 10)
+        painter.drawLine(10, h - 10, 10 + corner_len, h - 10)
+
+        # Bottom-Right Reticle
+        painter.drawLine(w - 10 - corner_len, h - 10, w - 10, h - 10)
+        painter.drawLine(w - 10, h - 10 - corner_len, w - 10, h - 10)
 
     # Draggable Window Logic
     def mousePressEvent(self, event):
