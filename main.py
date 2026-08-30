@@ -10,7 +10,9 @@ import time
 import datetime
 import ctypes
 import math
+import random
 import warnings
+from collections import deque
 
 # Suppress deprecation and cache warnings
 warnings.filterwarnings("ignore", category=UserWarning)
@@ -33,12 +35,12 @@ from pycaw.pycaw import AudioUtilities
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, 
-    QHBoxLayout, QLabel, QFrame, QPushButton, QProgressBar, QGridLayout
+    QHBoxLayout, QLabel, QFrame, QPushButton, QTextEdit, QLineEdit
 )
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPoint
+from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPoint, QPointF
 from PyQt6.QtGui import (
     QColor, QFont, QPainter, QBrush, QPen, QRadialGradient, 
-    QLinearGradient, QPolygonF
+    QLinearGradient, QPainterPath, QKeyEvent, QTextCursor
 )
 
 try:
@@ -52,14 +54,20 @@ try:
 except Exception:
     ytmusic_client = None
 
-# Global audio visualizer energy levels
+# Global dynamic signals and telemetry
 CURRENT_MIC_RMS = 0.0
-START_TIME = time.time()
+START_TIME = psutil.boot_time()  # Actual PC Boot Uptime
 LAST_NET_IO = psutil.net_io_counters()
 LAST_NET_TIME = time.time()
+NET_UP_SPEED = 0.0
+NET_DOWN_SPEED = 0.0
+
+# Typing protection flag to ignore keyboard clatter on mic
+IS_USER_TYPING = False
+LAST_TYPING_TIME = 0.0
 
 # -------------------------------------------------------------
-# 1. VOICE ENGINE (PIPER TTS & WHISPER STT)
+# 1. VOICE ENGINE (PIPER TTS & WHISPER STT - PACED SYNCHRONIZED)
 # -------------------------------------------------------------
 piper_dir = os.path.join(BASE_DIR, "piper")
 piper_exe = os.path.join(piper_dir, "piper.exe")
@@ -67,14 +75,26 @@ voice_model = os.path.join(piper_dir, "jarvis-medium.onnx")
 json_config = os.path.join(piper_dir, "jarvis-medium.onnx.json")
 temp_wav_path = os.path.join(BASE_DIR, "temp_input.wav")
 
-def speak(text, worker_ref=None):
-    """Synthesizes audio with dynamic visualizer energy streaming."""
+def speak(text, worker_ref=None, force_speech=False):
+    """Synthesizes audio with locked, paced typewriter synchronization."""
     global CURRENT_MIC_RMS
     if not text or not text.strip():
         return
 
-    print(f"\n[E.V.]: {text.strip()}")
-    
+    clean_text = text.strip()
+    words = clean_text.split()
+    print(f"\n[E.V.]: {clean_text}")
+
+    is_silent = worker_ref and worker_ref.voice_silent_mode and not force_speech
+    if is_silent:
+        if worker_ref:
+            worker_ref.stream_start.emit()
+            for w in words:
+                worker_ref.stream_word.emit(w + " ")
+                time.sleep(0.065)
+            worker_ref.stream_end.emit()
+        return
+
     if os.path.exists(piper_exe) and os.path.exists(voice_model):
         try:
             process = subprocess.Popen(
@@ -84,28 +104,63 @@ def speak(text, worker_ref=None):
                 stdout=subprocess.PIPE,
                 stderr=subprocess.DEVNULL
             )
-            raw_pcm_data, _ = process.communicate(input=text.encode('utf-8'))
+            raw_pcm_data, _ = process.communicate(input=clean_text.encode('utf-8'))
 
             if raw_pcm_data and len(raw_pcm_data) > 0:
                 audio_array = np.frombuffer(raw_pcm_data, dtype=np.int16)
-                sd.play(audio_array, samplerate=16000)
-                chunk_len = 1024
-                for i in range(0, len(audio_array), chunk_len):
-                    chunk = audio_array[i:i+chunk_len]
-                    if len(chunk) > 0:
-                        CURRENT_MIC_RMS = float(np.sqrt(np.mean(chunk.astype(np.float32)**2)))
-                    sd.sleep(int((len(chunk) / 16000) * 1000))
-                sd.wait()
+                total_samples = len(audio_array)
+                sample_rate = 16000
+                total_words = len(words)
+                audio_duration = total_samples / float(sample_rate)
+
+                if worker_ref:
+                    worker_ref.stream_start.emit()
+
+                # Start non-blocking playback
+                sd.play(audio_array, samplerate=sample_rate)
+                
+                # Pace word output precisely over the duration of the audio clip
+                start_time = time.time()
+                emitted_words = 0
+                
+                while emitted_words < total_words:
+                    elapsed = time.time() - start_time
+                    target_index = int((elapsed / audio_duration) * total_words)
+                    target_index = min(total_words, max(emitted_words, target_index))
+                    
+                    while emitted_words < target_index:
+                        if worker_ref:
+                            worker_ref.stream_word.emit(words[emitted_words] + " ")
+                        emitted_words += 1
+                        
+                    time.sleep(0.015)
+
+                sd.wait() # Ensure audio is fully cleared from speakers
+                
+                if worker_ref:
+                    while emitted_words < total_words:
+                        worker_ref.stream_word.emit(words[emitted_words] + " ")
+                        emitted_words += 1
+                    worker_ref.stream_end.emit()
+
                 CURRENT_MIC_RMS = 0.0
                 return
         except Exception as e:
-            print(f"[Piper Execution Error]: {e}")
+            print(f"[Piper Paced Sync Error]: {e}")
 
+    # Fallback
     try:
+        if worker_ref:
+            worker_ref.stream_start.emit()
+            for w in words:
+                worker_ref.stream_word.emit(w + " ")
+                time.sleep(0.07)
+            worker_ref.stream_end.emit()
+
         import pyttsx3
         engine = pyttsx3.init('sapi5')
         engine.setProperty('rate', 160)
-        engine.say(text)
+        engine.say(clean_text)
         engine.runAndWait()
         engine.stop()
     except Exception as e:
@@ -120,14 +175,14 @@ except Exception:
     print("[Whisper]: Running on CPU mode.")
 
 WHISPER_PROMPT = (
-    "E.V., Aimz, Sir, brightness, volume, mute, unmute, battery, "
+    "E.V., Aimz, Sir, brightness, volume, mute, unmute, mute e.v, unmute e.v, battery, "
     "system specs, RAM, CPU, weather, search, look up, price, Bitcoin, Ethereum, "
     "Solana, dollar, rand, euro, pound, exchange rate, richest, net worth, YouTube, "
     "YouTube Music, play, pause, open, VS Code, Spotify, Discord, Explorer, Task Manager."
 )
 
 def listen(silence_limit=0.6, threshold=450):
-    global CURRENT_MIC_RMS
+    global CURRENT_MIC_RMS, IS_USER_TYPING, LAST_TYPING_TIME
     sample_rate = 16000
     chunk_size = 1024
     
@@ -138,6 +193,11 @@ def listen(silence_limit=0.6, threshold=450):
     
     with sd.InputStream(samplerate=sample_rate, channels=1, dtype='int16') as stream:
         while True:
+            if IS_USER_TYPING or (time.time() - LAST_TYPING_TIME < 1.2):
+                sd.sleep(50)
+                CURRENT_MIC_RMS = 0.0
+                return ""
+
             data, _ = stream.read(chunk_size)
             audio_chunks.append(data.copy())
             
@@ -177,7 +237,7 @@ def listen(silence_limit=0.6, threshold=450):
     return "".join([segment.text for segment in segments]).strip()
 
 # -------------------------------------------------------------
-# 2. HARDWARE, SYSTEM & MEDIA UTILITIES
+# 2. SYSTEM TOOLS & WORKSPACE UTILITIES
 # -------------------------------------------------------------
 APP_SHORTCUTS = {
     "vscode": "code",
@@ -285,7 +345,7 @@ def play_youtube_video(query: str = ""):
         html = requests.get(f"https://www.youtube.com/results?search_query={encoded_query}", timeout=4).text
         video_ids = re.findall(r"watch\?v=(\S{11})", html)
         if video_ids:
-            webbrowser.open(f"https://www.youtube.com/watch?v={video_ids[0]}")
+            webbrowser.open(f"https://music.youtube.com/watch?v={video_ids[0]}")
             return f"Playing video for {clean_q} on YouTube, Aimz."
         
         webbrowser.open(f"https://www.youtube.com/results?search_query={encoded_query}")
@@ -492,17 +552,30 @@ def handle_direct_commands(text):
 class AssistantWorker(QThread):
     status_changed = pyqtSignal(str)
     user_speech_detected = pyqtSignal(str)
-    ai_response_generated = pyqtSignal(str)
+    
+    # Live Word-by-Word Stream Signals
+    stream_start = pyqtSignal()
+    stream_word = pyqtSignal(str)
+    stream_end = pyqtSignal()
+    
+    toggle_mute_requested = pyqtSignal()
+    busy_state_changed = pyqtSignal(bool)
 
     def __init__(self):
         super().__init__()
         self.is_running = True
         self.is_muted = False
+        self.voice_silent_mode = False
+        self.is_busy = False
+        self.text_queue = deque()
+
+    def submit_text_query(self, text):
+        self.text_queue.append(text)
 
     def run(self):
         self.status_changed.emit("SPEAKING")
-        self.ai_response_generated.emit("Visual diagnostics online. Tactical HUD initialized.")
-        speak("Visual diagnostics online. Tactical HUD initialized.", self)
+        init_greeting = "Cybernetic interface initialized. Systems nominal, Aimz."
+        speak(init_greeting, self, force_speech=True)
         self.status_changed.emit("STANDBY")
 
         system_prompt = {
@@ -523,24 +596,33 @@ class AssistantWorker(QThread):
 
         while self.is_running:
             try:
-                if self.is_muted:
-                    time.sleep(0.2)
+                if len(self.text_queue) > 0:
+                    user_input = self.text_queue.popleft()
+                elif not self.is_muted:
+                    self.status_changed.emit("LISTENING")
+                    user_input = listen(silence_limit=0.6, threshold=450)
+                else:
+                    time.sleep(0.1)
                     continue
-
-                self.status_changed.emit("LISTENING")
-                user_input = listen(silence_limit=0.6, threshold=450)
 
                 if not user_input or len(user_input.strip()) < 2:
                     self.status_changed.emit("STANDBY")
                     continue
 
+                self.is_busy = True
+                self.busy_state_changed.emit(True)
                 self.user_speech_detected.emit(user_input)
                 clean_input = user_input.lower().replace(".", "").strip()
 
+                if "mute e.v" in clean_input or "mute ev" in clean_input:
+                    self.toggle_mute_requested.emit()
+                    self.is_busy = False
+                    self.busy_state_changed.emit(False)
+                    continue
+
                 if any(w in clean_input for w in ["shutdown", "shut down", "goodbye", "exit", "stop"]):
                     self.status_changed.emit("SPEAKING")
-                    self.ai_response_generated.emit("Systems going offline. Goodbye, Aimz.")
-                    speak("Systems going offline. Goodbye, Aimz.", self)
+                    speak("Systems going offline. Goodbye, Aimz.", self, force_speech=True)
                     self.is_running = False
                     break
 
@@ -549,11 +631,12 @@ class AssistantWorker(QThread):
                 
                 if fast_reply:
                     self.status_changed.emit("SPEAKING")
-                    self.ai_response_generated.emit(fast_reply)
                     messages.append({"role": "user", "content": user_input})
                     messages.append({"role": "assistant", "content": fast_reply})
                     speak(fast_reply, self)
                     self.status_changed.emit("STANDBY")
+                    self.is_busy = False
+                    self.busy_state_changed.emit(False)
                     continue
 
                 needs_search = any(trigger in clean_input for trigger in SEARCH_TRIGGERS)
@@ -572,57 +655,146 @@ class AssistantWorker(QThread):
                 reply = response.message.content
 
                 self.status_changed.emit("SPEAKING")
-                self.ai_response_generated.emit(reply)
                 messages.append({"role": "assistant", "content": reply})
                 speak(reply, self)
                 self.status_changed.emit("STANDBY")
+                self.is_busy = False
+                self.busy_state_changed.emit(False)
 
             except Exception as e:
                 print(f"[Loop Exception]: {e}")
                 self.status_changed.emit("STANDBY")
+                self.is_busy = False
+                self.busy_state_changed.emit(False)
+
 
 # -------------------------------------------------------------
-# 4. ADVANCED J.A.R.V.I.S. ARC REACTOR HUD DIAL
+# 4. HIGH-DENSITY NEURAL SYNAPSE SWARM (DENSE MULTI-CLUSTER)
 # -------------------------------------------------------------
-class JarvisArcReactorDial(QWidget):
-    """Multi-ring sci-fi cybernetic Arc Reactor dial with animated rings & visualizer."""
+class NeuralSynapseSwarm(QWidget):
+    """Dense multi-cluster neural connectome with 260+ nodes, axon highways, and super-node flares."""
+    clicked_mute = pyqtSignal()
+
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setFixedSize(310, 310)
-        self.angle_outer = 0.0
-        self.angle_mid = 0.0
-        self.angle_inner = 0.0
+        self.setMouseTracking(True)
         self.state = "STANDBY"
-        
-        self.bars = 36
-        self.audio_levels = [0.0] * self.bars
-        
+
+        self.cluster_centers = [
+            {'x': -0.75, 'y':  0.35, 'z':  0.25},
+            {'x':  0.75, 'y':  0.35, 'z': -0.25},
+            {'x': -0.45, 'y': -0.65, 'z': -0.35},
+            {'x':  0.45, 'y': -0.65, 'z':  0.35},
+            {'x':  0.00, 'y':  0.75, 'z':  0.50},
+            {'x':  0.00, 'y': -0.15, 'z': -0.65},
+        ]
+
+        self.num_nodes = 260
+        self.nodes = []
+        for i in range(self.num_nodes):
+            cluster = self.cluster_centers[i % len(self.cluster_centers)]
+            if random.random() < 0.72:
+                spread = random.gauss(0, 0.32)
+                x = cluster['x'] + spread
+                y = cluster['y'] + spread
+                z = cluster['z'] + spread
+            else:
+                u = random.uniform(0, 1)
+                theta = random.uniform(0, 2 * math.pi)
+                phi = math.acos(2 * u - 1)
+                r = random.uniform(0.35, 1.45)
+                x = r * math.sin(phi) * math.cos(theta)
+                y = r * math.sin(phi) * math.sin(theta)
+                z = r * math.cos(phi)
+
+            self.nodes.append({
+                'base_x': x, 'base_y': y, 'base_z': z,
+                'orbit_speed': random.uniform(0.5, 1.4),
+                'phase': random.uniform(0, 2 * math.pi),
+                'is_super': (i % 14 == 0),
+                'pulse_offset': random.uniform(0, math.pi * 2)
+            })
+
+        self.rot_y = 0.0
+        self.rot_x = 0.0
+        self.target_tilt_x = 0.0
+        self.target_tilt_y = 0.0
+        self.curr_tilt_x = 0.0
+        self.curr_tilt_y = 0.0
+
+        self.swarm_expansion = 1.0
+        self.vortex_collapse = 1.0
+        self.shockwave_phase = 0.0
+        self.ring_rot = [0.0, 90.0]
+
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_animation)
-        self.timer.start(25)
+        self.timer.timeout.connect(self.update_physics)
+        self.timer.start(20)
 
     def set_state(self, state):
         self.state = state
 
-    def update_animation(self):
-        global CURRENT_MIC_RMS
-        speed_mult = 3.5 if self.state == "PROCESSING" else (2.0 if self.state == "SPEAKING" else 1.0)
-        self.angle_outer = (self.angle_outer + 0.8 * speed_mult) % 360
-        self.angle_mid = (self.angle_mid - 1.4 * speed_mult) % 360
-        self.angle_inner = (self.angle_inner + 2.2 * speed_mult) % 360
-        
-        target_amp = min(1.0, CURRENT_MIC_RMS / 2400.0)
-        if self.state in ["LISTENING", "SPEAKING"]:
-            target_amp = max(0.18, target_amp)
-        else:
-            target_amp = 0.04
+    def set_parallax(self, norm_x, norm_y):
+        self.target_tilt_y = norm_x * 0.40
+        self.target_tilt_x = -norm_y * 0.40
 
-        for i in range(self.bars):
-            var = math.sin((self.angle_outer * 0.08) + (i * 0.45)) * 0.22
-            val = max(0.04, target_amp + var)
-            self.audio_levels[i] += (val - self.audio_levels[i]) * 0.35
-            
+    def update_physics(self):
+        global CURRENT_MIC_RMS
+        
+        if self.state == "PROCESSING":
+            speed_mult = 3.8
+            target_collapse = 0.48
+            target_exp = 1.0
+        elif self.state == "LISTENING":
+            speed_mult = 1.2
+            target_collapse = 1.0
+            energy = min(1.0, CURRENT_MIC_RMS / 2000.0)
+            target_exp = 1.0 + (energy * 0.65)
+        elif self.state == "SPEAKING":
+            speed_mult = 2.0
+            target_collapse = 1.0
+            target_exp = 1.0 + math.sin(self.shockwave_phase) * 0.18
+            self.shockwave_phase += 0.28
+        else:
+            speed_mult = 0.8
+            target_collapse = 1.0
+            target_exp = 1.0 + math.sin(time.time() * 1.5) * 0.05
+
+        self.rot_y = (self.rot_y + 0.013 * speed_mult) % (2 * math.pi)
+        self.rot_x = (self.rot_x + 0.007 * speed_mult) % (2 * math.pi)
+
+        self.curr_tilt_x += (self.target_tilt_x - self.curr_tilt_x) * 0.1
+        self.curr_tilt_y += (self.target_tilt_y - self.curr_tilt_y) * 0.1
+
+        self.swarm_expansion += (target_exp - self.swarm_expansion) * 0.25
+        self.vortex_collapse += (target_collapse - self.vortex_collapse) * 0.2
+
+        self.ring_rot[0] = (self.ring_rot[0] + 0.9 * speed_mult) % 360
+        self.ring_rot[1] = (self.ring_rot[1] - 1.3 * speed_mult) % 360
+
         self.update()
+
+    def mousePressEvent(self, event):
+        cx, cy = self.width() / 2, self.height() / 2
+        if math.hypot(event.position().x() - cx, event.position().y() - cy) < 60:
+            self.clicked_mute.emit()
+            event.accept()
+
+    def project_node(self, x, y, z, cx, cy, radius_scale, rx, ry):
+        x1 = x * math.cos(ry) + z * math.sin(ry)
+        y1 = y
+        z1 = -x * math.sin(ry) + z * math.cos(ry)
+
+        x2 = x1
+        y2 = y1 * math.cos(rx) - z1 * math.sin(rx)
+        z2 = y1 * math.sin(rx) + z1 * math.cos(rx)
+
+        fov = 240.0
+        depth = fov / (fov + z2 * radius_scale)
+        px = cx + x2 * radius_scale * depth
+        py = cy + y2 * radius_scale * depth
+        return px, py, z2
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -630,117 +802,455 @@ class JarvisArcReactorDial(QWidget):
 
         cx, cy = self.width() / 2, self.height() / 2
 
-        # State color mappings
         colors = {
-            "STANDBY": (QColor(0, 215, 255), QColor(0, 215, 255, 30)),
-            "LISTENING": (QColor(0, 255, 170), QColor(0, 255, 170, 60)),
-            "PROCESSING": (QColor(255, 185, 0), QColor(255, 185, 0, 60)),
-            "SPEAKING": (QColor(0, 165, 255), QColor(0, 165, 255, 75)),
-            "MUTED": (QColor(255, 60, 90), QColor(255, 60, 90, 50))
+            "STANDBY": (QColor(0, 210, 255), QColor(0, 210, 255, 18)),
+            "LISTENING": (QColor(0, 255, 170), QColor(0, 255, 170, 26)),
+            "PROCESSING": (QColor(255, 190, 0), QColor(255, 190, 0, 26)),
+            "SPEAKING": (QColor(0, 160, 255), QColor(0, 160, 255, 30)),
+            "MUTED": (QColor(130, 140, 150), QColor(130, 140, 150, 12))
         }
         primary, glow = colors.get(self.state, colors["STANDBY"])
 
-        # 1. Background Radial Glow
-        bg_grad = QRadialGradient(cx, cy, 145)
-        bg_grad.setColorAt(0.0, glow)
-        bg_grad.setColorAt(0.7, QColor(0, 0, 0, 100))
-        bg_grad.setColorAt(1.0, QColor(0, 0, 0, 0))
-        painter.setBrush(QBrush(bg_grad))
-        painter.setPen(Qt.PenStyle.NoPen)
-        painter.drawEllipse(0, 0, self.width(), self.height())
-
-        # 2. Outer Segmented Tick Ring (Image 1 style)
         painter.save()
-        painter.translate(cx, cy)
-        painter.rotate(self.angle_outer * 0.4)
-        num_ticks = 48
-        for i in range(num_ticks):
-            is_major = (i % 4 == 0)
-            t_len = 8 if is_major else 4
-            t_pen = QPen(primary if is_major else QColor(0, 215, 255, 100), 1.8 if is_major else 1.0)
-            painter.setPen(t_pen)
-            painter.drawLine(0, 142, 0, 142 - t_len)
-            painter.rotate(360 / num_ticks)
+        painter.translate(cx + (self.curr_tilt_y * 12), cy + (self.curr_tilt_x * 12))
+        painter.setBrush(Qt.BrushStyle.NoBrush)
+        
+        pen_ring1 = QPen(QColor(primary.red(), primary.green(), primary.blue(), 45), 1, Qt.PenStyle.DashLine)
+        painter.setPen(pen_ring1)
+        painter.rotate(self.ring_rot[0])
+        painter.drawEllipse(-122, -44, 244, 88)
+
+        pen_ring2 = QPen(QColor(primary.red(), primary.green(), primary.blue(), 35), 1, Qt.PenStyle.DotLine)
+        painter.setPen(pen_ring2)
+        painter.rotate(self.ring_rot[1])
+        painter.drawEllipse(-108, -62, 216, 124)
         painter.restore()
 
-        # 3. Outer Arcs & Crosshair Reticles
-        pen = QPen(primary, 2, Qt.PenStyle.DashLine)
-        painter.setPen(pen)
-        painter.drawArc(int(cx - 128), int(cy - 128), 256, 256, int(self.angle_outer * 16), 110 * 16)
-        painter.drawArc(int(cx - 128), int(cy - 128), 256, 256, int((self.angle_outer + 180) * 16), 110 * 16)
+        tot_rx = self.rot_x + self.curr_tilt_x
+        tot_ry = self.rot_y + self.curr_tilt_y
+        effective_r = 82.0 * self.swarm_expansion * self.vortex_collapse
 
-        # 4. Radial Audio Visualizer Spikes
-        painter.save()
-        painter.translate(cx, cy)
-        r_inner = 88
-        for i in range(self.bars):
-            rot = (360.0 / self.bars) * i + self.angle_mid
-            painter.save()
-            painter.rotate(rot)
-            bar_len = 4 + (self.audio_levels[i] * 34)
-            pen = QPen(primary, 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
-            painter.setPen(pen)
-            painter.drawLine(0, int(r_inner), 0, int(r_inner + bar_len))
-            painter.restore()
-        painter.restore()
+        proj_nodes = []
+        for nd in self.nodes:
+            wobble = math.sin(time.time() * nd['orbit_speed'] + nd['phase']) * 0.06
+            nx = nd['base_x'] + wobble
+            ny = nd['base_y'] + wobble
+            nz = nd['base_z'] + wobble
 
-        # 5. Mid Segmented Chevron/Hazard Ring
-        pen = QPen(QColor(0, 215, 255, 160), 1.5, Qt.PenStyle.DotLine)
-        painter.setPen(pen)
-        painter.drawEllipse(int(cx - 82), int(cy - 82), 164, 164)
+            px, py, pz = self.project_node(nx, ny, nz, cx, cy, effective_r, tot_rx, tot_ry)
+            proj_nodes.append((px, py, pz, nd['is_super'], nd['pulse_offset']))
 
-        # 6. Inner Fast Counter-Rotating Arcs
-        pen_inner = QPen(primary, 2.5, Qt.PenStyle.SolidLine)
-        painter.setPen(pen_inner)
-        painter.drawArc(int(cx - 62), int(cy - 62), 124, 124, int(self.angle_inner * 16), 75 * 16)
-        painter.drawArc(int(cx - 62), int(cy - 62), 124, 124, int((self.angle_inner + 180) * 16), 75 * 16)
+        if self.state != "MUTED":
+            conn_dist_sq = (46.0 * self.vortex_collapse) ** 2
+            for i in range(0, len(proj_nodes)):
+                p1 = proj_nodes[i]
+                for j in range(i + 1, min(i + 8, len(proj_nodes))):
+                    p2 = proj_nodes[j]
+                    dx = p1[0] - p2[0]
+                    dy = p1[1] - p2[1]
+                    d_sq = dx*dx + dy*dy
+                    if d_sq < conn_dist_sq:
+                        dist = math.sqrt(d_sq)
+                        max_d = 46.0 * self.vortex_collapse
+                        alpha = int(max(10, min(160, (1.0 - (dist / max_d)) * 130)))
+                        avg_z = (p1[2] + p2[2]) / 2.0
+                        if avg_z < 0: alpha = int(alpha * 0.45)
 
-        # 7. Central Core Reactor Badge
-        core_grad = QRadialGradient(cx, cy, 38)
-        core_grad.setColorAt(0.0, QColor(255, 255, 255, 255))
-        core_grad.setColorAt(0.4, primary)
-        core_grad.setColorAt(1.0, QColor(4, 10, 18, 230))
+                        pen_line = QPen(QColor(primary.red(), primary.green(), primary.blue(), alpha), 0.8)
+                        painter.setPen(pen_line)
+                        painter.drawLine(int(p1[0]), int(p1[1]), int(p2[0]), int(p2[1]))
+
+        for (px, py, pz, is_super, p_offset) in proj_nodes:
+            depth_alpha = int(max(25, min(240, 130 + pz * 110)))
+            
+            if is_super and self.state != "MUTED":
+                pulse_brightness = (math.sin(time.time() * 6.5 + p_offset) + 1.0) * 0.5
+                painter.setBrush(QBrush(QColor(255, 235, 170, int(180 + pulse_brightness * 75))))
+                painter.setPen(QPen(primary, 1.2))
+                sz = 3.6 if pz > 0 else 2.2
+                painter.drawEllipse(int(px - sz/2), int(py - sz/2), int(sz), int(sz))
+            else:
+                painter.setBrush(QBrush(QColor(primary.red(), primary.green(), primary.blue(), depth_alpha)))
+                painter.setPen(Qt.PenStyle.NoPen)
+                sz = 2.0 if pz > 0 else 1.2
+                painter.drawEllipse(int(px - sz/2), int(py - sz/2), int(sz), int(sz))
+
+        core_grad = QRadialGradient(cx, cy, 26)
+        core_grad.setColorAt(0.0, QColor(255, 255, 255, 240))
+        core_grad.setColorAt(0.45, primary)
+        core_grad.setColorAt(1.0, QColor(6, 12, 20, 230))
         painter.setBrush(QBrush(core_grad))
-        painter.setPen(QPen(primary, 1.5))
-        painter.drawEllipse(int(cx - 38), int(cy - 38), 76, 76)
+        painter.setPen(QPen(primary, 1.2))
+        painter.drawEllipse(int(cx - 24), int(cy - 24), 48, 48)
 
-        # 8. Center Label / State Code
-        painter.setPen(QPen(QColor(255, 255, 255, 220)))
-        painter.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
-        display_code = "E.V." if self.state == "STANDBY" else self.state[:4]
-        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, display_code)
+        painter.setPen(QPen(QColor(0, 0, 0, 230) if self.state != "MUTED" else QColor(255, 255, 255, 220)))
+        painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        core_lbl = "MUTE" if self.state == "MUTED" else "E.V."
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, core_lbl)
 
 
 # -------------------------------------------------------------
-# 5. FULL TACTICAL J.A.R.V.I.S. HUD DASHBOARD
+# 5. CHAMFERED OSCILLOSCOPE TELEMETRY GRAPH
 # -------------------------------------------------------------
-class JarvisHUD(QMainWindow):
+class CyberSparklineGraph(QWidget):
+    """Oscilloscope graph with 45° chamfered shell, full rectangular grid, y-axis scales, and translucent fill."""
+    def __init__(self, title, max_history=36, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(148, 92)
+        self.title = title
+        self.history = deque([0.0] * max_history, maxlen=max_history)
+        self.subtext = "0%"
+        self.primary_color = QColor(0, 210, 255)
+
+    def add_data_point(self, val, subtext=""):
+        self.history.append(min(100.0, max(0.0, float(val))))
+        self.subtext = subtext
+        self.update()
+
+    def set_theme_color(self, color):
+        self.primary_color = color
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = self.width()
+        h = self.height()
+
+        chamfer_path = QPainterPath()
+        chamfer_path.moveTo(6, 0)
+        chamfer_path.lineTo(w - 6, 0)
+        chamfer_path.lineTo(w, 6)
+        chamfer_path.lineTo(w, h - 6)
+        chamfer_path.lineTo(w - 6, h)
+        chamfer_path.lineTo(6, h)
+        chamfer_path.lineTo(0, h - 6)
+        chamfer_path.lineTo(0, 6)
+        chamfer_path.closeSubpath()
+
+        painter.fillPath(chamfer_path, QBrush(QColor(4, 10, 18, 140)))
+        painter.setPen(QPen(QColor(self.primary_color.red(), self.primary_color.green(), self.primary_color.blue(), 90), 1))
+        painter.drawPath(chamfer_path)
+
+        painter.setPen(QPen(QColor(240, 245, 255, 235)))
+        painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        painter.drawText(6, 12, f"[{self.title}]")
+
+        painter.setPen(QPen(self.primary_color))
+        painter.setFont(QFont("Consolas", 7, QFont.Weight.Bold))
+        painter.drawText(w - 48, 12, f"~ {self.subtext}")
+
+        gx = 24
+        gy = 18
+        gw = w - gx - 6
+        gh = h - gy - 8
+
+        painter.fillRect(gx, gy, gw, gh, QColor(4, 10, 18, 110))
+        painter.setPen(QPen(QColor(self.primary_color.red(), self.primary_color.green(), self.primary_color.blue(), 100), 1))
+        painter.drawRect(gx, gy, gw, gh)
+
+        painter.setPen(QPen(QColor(160, 185, 205, 180)))
+        painter.setFont(QFont("Consolas", 5))
+        painter.drawText(2, gy + 7, "100")
+        painter.drawText(6, int(gy + gh / 2 + 3), "50")
+        painter.drawText(10, gy + gh, "0")
+
+        grid_pen = QPen(QColor(255, 255, 255, 24), 1, Qt.PenStyle.DotLine)
+        painter.setPen(grid_pen)
+        for i in range(1, 4):
+            y_line = int(gy + (gh * i / 4.0))
+            painter.drawLine(gx, y_line, gx + gw, y_line)
+
+        for i in range(1, 6):
+            x_line = int(gx + (gw * i / 6.0))
+            painter.drawLine(x_line, gy, x_line, gy + gh)
+
+        pts = []
+        n = len(self.history)
+        for i, val in enumerate(self.history):
+            px = gx + (float(i) / (n - 1)) * gw
+            py = (gy + gh) - (val / 100.0) * gh
+            pts.append(QPointF(px, py))
+
+        if len(pts) > 1:
+            fill_path = QPainterPath()
+            fill_path.moveTo(pts[0].x(), gy + gh)
+            for pt in pts:
+                fill_path.lineTo(pt)
+            fill_path.lineTo(pts[-1].x(), gy + gh)
+            fill_path.closeSubpath()
+
+            grad = QLinearGradient(0, gy, 0, gy + gh)
+            grad.setColorAt(0.0, QColor(self.primary_color.red(), self.primary_color.green(), self.primary_color.blue(), 85))
+            grad.setColorAt(0.7, QColor(self.primary_color.red(), self.primary_color.green(), self.primary_color.blue(), 20))
+            grad.setColorAt(1.0, QColor(0, 0, 0, 0))
+            painter.fillPath(fill_path, QBrush(grad))
+
+            wave_pen = QPen(self.primary_color, 1.6, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap, Qt.PenJoinStyle.RoundJoin)
+            painter.setPen(wave_pen)
+            for i in range(len(pts) - 1):
+                painter.drawLine(pts[i], pts[i+1])
+
+            painter.setBrush(QBrush(QColor(255, 255, 255)))
+            painter.setPen(QPen(self.primary_color, 1))
+            painter.drawEllipse(pts[-1], 2.2, 2.2)
+
+
+# -------------------------------------------------------------
+# 6. CHAMFERED TACTICAL PUSH BUTTON WIDGET
+# -------------------------------------------------------------
+class CyberChamferButton(QPushButton):
+    """Tactical push button with cutaway 45-degree chamfered corners."""
+    def __init__(self, text, parent=None):
+        super().__init__(text, parent)
+        self.setFixedHeight(28)
+        self.primary_color = QColor(0, 210, 255)
+        self.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+
+    def set_theme_color(self, color):
+        self.primary_color = color
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = self.width()
+        h = self.height()
+        is_down = self.isDown()
+        is_hover = self.underMouse()
+
+        path = QPainterPath()
+        path.moveTo(6, 0)
+        path.lineTo(w - 6, 0)
+        path.lineTo(w, 6)
+        path.lineTo(w, h - 6)
+        path.lineTo(w - 6, h)
+        path.lineTo(6, h)
+        path.lineTo(0, h - 6)
+        path.lineTo(0, 6)
+        path.closeSubpath()
+
+        bg_alpha = 75 if is_down else (50 if is_hover else 25)
+        painter.fillPath(path, QBrush(QColor(self.primary_color.red(), self.primary_color.green(), self.primary_color.blue(), bg_alpha)))
+
+        border_pen = QPen(self.primary_color if is_hover else QColor(self.primary_color.red(), self.primary_color.green(), self.primary_color.blue(), 120), 1.2)
+        painter.setPen(border_pen)
+        painter.drawPath(path)
+
+        painter.setPen(QPen(QColor(255, 255, 255) if is_hover else QColor(220, 235, 250)))
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
+
+
+# -------------------------------------------------------------
+# 7. COMMAND LINE PROMPT (KEYBOARD HISTORY NAVIGATION)
+# -------------------------------------------------------------
+class CyberCommandLine(QLineEdit):
+    """Command input with Up/Down arrow history navigation and typing protection."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.history = []
+        self.history_index = 0
+
+    def add_to_history(self, text):
+        if text and (not self.history or self.history[-1] != text):
+            self.history.append(text)
+        self.history_index = len(self.history)
+
+    def keyPressEvent(self, event: QKeyEvent):
+        global IS_USER_TYPING, LAST_TYPING_TIME
+        IS_USER_TYPING = True
+        LAST_TYPING_TIME = time.time()
+
+        if event.key() == Qt.Key.Key_Up:
+            if self.history and self.history_index > 0:
+                self.history_index -= 1
+                self.setText(self.history[self.history_index])
+            event.accept()
+            return
+        elif event.key() == Qt.Key.Key_Down:
+            if self.history and self.history_index < len(self.history) - 1:
+                self.history_index += 1
+                self.setText(self.history[self.history_index])
+            else:
+                self.history_index = len(self.history)
+                self.clear()
+            event.accept()
+            return
+        elif event.key() == Qt.Key.Key_Escape:
+            self.clear()
+            event.accept()
+            return
+
+        super().keyPressEvent(event)
+
+
+# -------------------------------------------------------------
+# 8. LIVE HARDWARE [KERN_STREAM // MEM_DUMP] PANEL
+# -------------------------------------------------------------
+class CyberMemoryStreamPanel(QWidget):
+    """Samples real Windows kernel processes and active memory allocations with chamfered styling."""
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.state = "STANDBY"
+        self.primary_color = QColor(0, 210, 255)
+        
+        self.lines = deque(maxlen=20)
+        self.init_hardware_stream()
+
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.stream_step)
+        self.timer.start(120)
+
+    def init_hardware_stream(self):
+        for _ in range(20):
+            self.lines.append(self.sample_hardware_memory_dump())
+
+    def set_state(self, state):
+        self.state = state
+        if state == "PROCESSING":
+            self.timer.setInterval(30)
+        elif state == "SPEAKING":
+            self.timer.setInterval(60)
+        else:
+            self.timer.setInterval(120)
+
+    def set_theme_color(self, color):
+        self.primary_color = color
+        self.update()
+
+    def sample_hardware_memory_dump(self):
+        try:
+            pids = psutil.pids()
+            if pids:
+                pid = random.choice(pids)
+                proc = psutil.Process(pid)
+                mem_info = proc.memory_info()
+                rss_bytes = mem_info.rss
+                vms_bytes = mem_info.vms
+                
+                addr = f"0x{(pid * 0x10000 + (vms_bytes & 0xFFFF)):08X}"
+                
+                b1 = (rss_bytes >> 24) & 0xFF
+                b2 = (rss_bytes >> 16) & 0xFF
+                b3 = (rss_bytes >> 8) & 0xFF
+                b4 = rss_bytes & 0xFF
+                b5 = (vms_bytes >> 16) & 0xFF
+                b6 = (vms_bytes >> 8) & 0xFF
+                hex_bytes = f"{b1:02X} {b2:02X} {b3:02X} {b4:02X} {b5:02X} {b6:02X}"
+                
+                pname = proc.name()[:8].ljust(8, '.')
+                ascii_chars = f"[{proc.status()[:3].upper()}] {pname}"
+                return addr, hex_bytes, ascii_chars
+        except Exception:
+            pass
+
+        addr = f"0x{random.randint(0x10000000, 0x7FFFFFFF):08X}"
+        hex_bytes = " ".join([f"{random.randint(0, 255):02X}" for _ in range(6)])
+        ascii_chars = "[ACT] sys_idle"
+        return addr, hex_bytes, ascii_chars
+
+    def stream_step(self):
+        self.lines.append(self.sample_hardware_memory_dump())
+        self.update()
+
+    def paintEvent(self, event):
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        w = self.width()
+        h = self.height()
+
+        path = QPainterPath()
+        path.moveTo(0, 0)
+        path.lineTo(w - 48, 0)
+        path.lineTo(w - 32, 16)
+        path.lineTo(w, 16)
+        path.lineTo(w, h)
+        path.lineTo(0, h)
+        path.lineTo(0, 72)
+        path.lineTo(12, 60)
+        path.lineTo(12, 28)
+        path.lineTo(0, 16)
+        path.closeSubpath()
+
+        painter.fillPath(path, QBrush(QColor(4, 10, 18, 140)))
+        border_pen = QPen(QColor(self.primary_color.red(), self.primary_color.green(), self.primary_color.blue(), 110), 1.2)
+        painter.setPen(border_pen)
+        painter.drawPath(path)
+
+        grill_pen = QPen(QColor(self.primary_color.red(), self.primary_color.green(), self.primary_color.blue(), 140), 1)
+        painter.setPen(grill_pen)
+        for i in range(7):
+            gx = (w - 44) + i * 5
+            painter.drawLine(gx, 4, gx + 8, 12)
+
+        painter.setPen(QPen(QColor(235, 245, 255, 240)))
+        painter.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        painter.drawText(16, 18, "[KERN_STREAM // MEM_DUMP]")
+
+        painter.setBrush(QBrush(QColor(self.primary_color.red(), self.primary_color.green(), self.primary_color.blue(), 160)))
+        painter.setPen(Qt.PenStyle.NoPen)
+        painter.drawRoundedRect(w - 14, 26, 4, 18, 2, 2)
+
+        painter.setFont(QFont("Consolas", 7))
+        y = 38
+        for idx, (addr, hex_b, ascii_c) in enumerate(self.lines):
+            alpha = int(70 + (idx / len(self.lines)) * 185)
+            
+            painter.setPen(QPen(QColor(130, 175, 215, alpha)))
+            painter.drawText(14, y, f"{addr}")
+
+            painter.setPen(QPen(QColor(self.primary_color.red(), self.primary_color.green(), self.primary_color.blue(), alpha)))
+            painter.drawText(86, y, hex_b)
+
+            painter.setPen(QPen(QColor(160, 205, 225, alpha)))
+            painter.drawText(w - 92, y, ascii_c)
+
+            y += 13
+
+
+# -------------------------------------------------------------
+# 9. MAIN WIDESCREEN COMMAND HUD WINDOW
+# -------------------------------------------------------------
+class JarvisWidescreenHUD(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("J.A.R.V.I.S. Tactical Neural HUD")
-        self.setFixedSize(920, 580)
+        self.setWindowTitle("E.V. Cybernetic Tactical Interface")
+        self.setFixedSize(1060, 610)
+        self.setMouseTracking(True)
         
-        # Transparent Frameless Window
+        # Frameless Holographic Window
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         self.drag_position = QPoint()
+        self.is_dragging = False
         self.is_compact = False
-        
-        # Typewriter text streaming state
-        self.typing_target_text = ""
-        self.typing_index = 0
-        self.typing_timer = QTimer(self)
-        self.typing_timer.timeout.connect(self.stream_text_character)
+        self.current_theme = QColor(0, 210, 255)
 
         self.init_ui()
 
-        # Start Background Voice Thread
+        # Start Background Voice/Text Thread
         self.worker = AssistantWorker()
         self.worker.status_changed.connect(self.update_status)
-        self.worker.user_speech_detected.connect(self.update_user_text)
-        self.worker.ai_response_generated.connect(self.trigger_ai_typing)
+        self.worker.user_speech_detected.connect(self.append_user_transcript)
+        
+        # Connect Real-time Word-by-Word Synchronized Stream
+        self.worker.stream_start.connect(self.handle_stream_start)
+        self.worker.stream_word.connect(self.handle_stream_word)
+        self.worker.stream_end.connect(self.handle_stream_end)
+
+        self.worker.toggle_mute_requested.connect(self.toggle_mute)
+        self.worker.busy_state_changed.connect(self.update_busy_ui)
         self.worker.start()
+
+        # Typing Watcher Timer (resets typing flag after idle)
+        self.typing_timer = QTimer(self)
+        self.typing_timer.timeout.connect(self.check_typing_status)
+        self.typing_timer.start(300)
 
         # Real-time System Telemetry Timer
         self.stats_timer = QTimer(self)
@@ -751,369 +1261,425 @@ class JarvisHUD(QMainWindow):
     def init_ui(self):
         self.main_container = QWidget(self)
         self.main_container.setObjectName("Container")
+        self.main_container.setMouseTracking(True)
+        
         self.main_container.setStyleSheet("""
             QWidget#Container {
-                background-color: rgba(6, 11, 18, 0.94);
-                border: 1.5px solid rgba(0, 215, 255, 0.5);
+                background-color: rgba(6, 12, 20, 0.94);
+                border: 1.5px solid rgba(0, 210, 255, 0.5);
                 border-radius: 18px;
             }
+            QFrame {
+                border: none !important;
+                background: transparent !important;
+            }
             QLabel {
-                font-family: 'Consolas', 'Segoe UI', monospace;
+                font-family: 'Consolas', monospace;
+                border: none !important;
+                background: transparent !important;
             }
-            QProgressBar {
-                border: 1px solid rgba(0, 215, 255, 0.35);
-                border-radius: 3px;
-                background-color: rgba(4, 8, 14, 0.9);
-                text-align: right;
-                padding-right: 4px;
+            QTextEdit {
+                background-color: transparent !important;
+                border: none !important;
                 color: #00f0ff;
-                font-size: 9px;
-                font-family: 'Consolas';
-                font-weight: bold;
+                font-family: 'Consolas', monospace;
+                font-size: 11px;
+                padding: 4px;
             }
-            QProgressBar::chunk {
-                background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #005588, stop:1 #00f0ff);
-                border-radius: 2px;
+            QLineEdit {
+                background-color: rgba(4, 10, 18, 140);
+                border: 1px solid rgba(0, 210, 255, 0.4);
+                border-radius: 4px;
+                color: #00f0ff;
+                font-family: 'Consolas', monospace;
+                font-size: 10px;
+                padding: 4px 8px;
+            }
+            QLineEdit:focus {
+                border: 1px solid #00d2ff;
+                background-color: rgba(4, 10, 18, 200);
             }
         """)
 
         root_layout = QVBoxLayout(self.main_container)
-        root_layout.setContentsMargins(20, 16, 20, 16)
-        root_layout.setSpacing(10)
+        root_layout.setContentsMargins(18, 12, 18, 12)
+        root_layout.setSpacing(6)
 
-        # 1. Top HUD Header
+        # 1. Top Cyberpunk HUD Header
         top_bar = QHBoxLayout()
-        title_label = QLabel("MARK-VII // E.V. TACTICAL SYSTEM MONITOR")
-        title_label.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
-        title_label.setStyleSheet("color: #00f0ff; letter-spacing: 2.5px;")
+        self.title_label = QLabel("MARK-VIII // E.V. TACTICAL CYBERDECK")
+        self.title_label.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        self.title_label.setStyleSheet("color: #00d2ff; letter-spacing: 2px;")
         
+        self.badge_status = QLabel("[SYS_OK]")
+        self.badge_status.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.badge_status.setStyleSheet("color: #00ffaa; background: rgba(0,255,170,0.12); padding: 2px 6px; border-radius: 4px;")
+
+        self.btn_voice_mode = QPushButton("[VOICE: ON]")
+        self.btn_voice_mode.setToolTip("Toggle Stealth / Silent Voice Mode")
+        self.btn_voice_mode.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.btn_voice_mode.setStyleSheet("QPushButton { color: #00ffaa; background: rgba(0,255,170,0.12); border: 1px solid rgba(0,255,170,0.35); border-radius: 4px; padding: 2px 6px; } QPushButton:hover { background: rgba(0,255,170,0.28); }")
+        self.btn_voice_mode.clicked.connect(self.toggle_voice_mode)
+
         self.time_label = QLabel()
-        self.time_label.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
-        self.time_label.setStyleSheet("color: #00d7ff;")
+        self.time_label.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+        self.time_label.setStyleSheet("color: #d0d8e0;")
 
         btn_compact = QPushButton("▫")
         btn_compact.setToolTip("Toggle Compact Mode")
-        btn_compact.setFixedSize(26, 26)
-        btn_compact.setStyleSheet("QPushButton { color: #00d7ff; background: rgba(0,215,255,0.12); border: 1px solid rgba(0,215,255,0.4); border-radius: 13px; font-weight: bold; } QPushButton:hover { background: rgba(0,215,255,0.3); }")
+        btn_compact.setFixedSize(24, 24)
+        btn_compact.setStyleSheet("QPushButton { color: #00d2ff; background: rgba(0,210,255,0.15); border: 1px solid rgba(0,210,255,0.4); border-radius: 12px; font-weight: bold; } QPushButton:hover { background: rgba(0,210,255,0.35); }")
         btn_compact.clicked.connect(self.toggle_compact_mode)
 
         btn_close = QPushButton("✕")
         btn_close.setToolTip("Shutdown Assistant")
-        btn_close.setFixedSize(26, 26)
-        btn_close.setStyleSheet("QPushButton { color: #ff5566; background: rgba(255,85,102,0.12); border: 1px solid rgba(255,85,102,0.4); border-radius: 13px; font-weight: bold; } QPushButton:hover { background: rgba(255,85,102,0.3); }")
+        btn_close.setFixedSize(24, 24)
+        btn_close.setStyleSheet("QPushButton { color: #ff5566; background: rgba(255,85,102,0.15); border: 1px solid rgba(255,85,102,0.4); border-radius: 12px; font-weight: bold; } QPushButton:hover { background: rgba(255,85,102,0.35); }")
         btn_close.clicked.connect(self.close_application)
 
-        top_bar.addWidget(title_label)
+        top_bar.addWidget(self.title_label)
+        top_bar.addSpacing(8)
+        top_bar.addWidget(self.badge_status)
+        top_bar.addSpacing(6)
+        top_bar.addWidget(self.btn_voice_mode)
         top_bar.addStretch()
         top_bar.addWidget(self.time_label)
-        top_bar.addSpacing(12)
+        top_bar.addSpacing(10)
         top_bar.addWidget(btn_compact)
         top_bar.addWidget(btn_close)
         root_layout.addLayout(top_bar)
 
-        # 2. Main Middle Section (Arc Reactor Center + Telemetry Side-Panels)
+        # 2. Main Middle Section
         self.middle_section = QHBoxLayout()
-        self.middle_section.setSpacing(16)
+        self.middle_section.setSpacing(12)
 
-        # LEFT PANEL: System Monitor & Network Gauges (Image 2 style)
+        # LEFT PANEL: Terminal Feed with Synchronized Typewriter Output & History Input
         self.left_panel = QFrame()
-        self.left_panel.setStyleSheet("QFrame { background: rgba(3, 8, 14, 0.75); border: 1px solid rgba(0,215,255,0.25); border-radius: 10px; padding: 8px; }")
         left_layout = QVBoxLayout(self.left_panel)
-        left_layout.setSpacing(6)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(4)
 
-        panel_title = QLabel("SYSTEM METRICS")
-        panel_title.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
-        panel_title.setStyleSheet("color: #00f0ff; letter-spacing: 1.5px;")
-        left_layout.addWidget(panel_title)
-
-        # CPU Progress
-        self.lbl_cpu_text = QLabel("CPU Usage: 0%")
-        self.lbl_cpu_text.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
-        self.lbl_cpu_text.setStyleSheet("color: #00d7ff;")
-        self.bar_cpu = QProgressBar()
-        self.bar_cpu.setFixedHeight(12)
-        left_layout.addWidget(self.lbl_cpu_text)
-        left_layout.addWidget(self.bar_cpu)
-
-        # RAM Progress
-        self.lbl_ram_text = QLabel("RAM: 0.0G / 0.0G (0%)")
-        self.lbl_ram_text.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
-        self.lbl_ram_text.setStyleSheet("color: #00d7ff;")
-        self.bar_ram = QProgressBar()
-        self.bar_ram.setFixedHeight(12)
-        left_layout.addWidget(self.lbl_ram_text)
-        left_layout.addWidget(self.bar_ram)
-
-        # Disk Usage Progress
-        self.lbl_disk_text = QLabel("Disk Usage: 0.0G / 0.0G")
-        self.lbl_disk_text.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
-        self.lbl_disk_text.setStyleSheet("color: #00d7ff;")
-        self.bar_disk = QProgressBar()
-        self.bar_disk.setFixedHeight(12)
-        left_layout.addWidget(self.lbl_disk_text)
-        left_layout.addWidget(self.bar_disk)
-
-        # Network / Process Readout
-        self.lbl_net_up = QLabel("Network Up: 0 KB/s")
-        self.lbl_net_up.setFont(QFont("Consolas", 8))
-        self.lbl_net_up.setStyleSheet("color: #8bbcdb;")
+        cmd_header = QHBoxLayout()
+        lbl_console = QLabel("TERMINAL FEED")
+        lbl_console.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        lbl_console.setStyleSheet("color: #00d2ff; letter-spacing: 1px;")
         
-        self.lbl_net_down = QLabel("Network Down: 0 KB/s")
-        self.lbl_net_down.setFont(QFont("Consolas", 8))
-        self.lbl_net_down.setStyleSheet("color: #8bbcdb;")
+        btn_clear = QPushButton("CLEAR")
+        btn_clear.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        btn_clear.setStyleSheet("QPushButton { background: rgba(0,210,255,0.12); border: 1px solid rgba(0,210,255,0.35); border-radius: 4px; color: #00d2ff; padding: 2px 6px; } QPushButton:hover { background: rgba(0,210,255,0.3); color: #fff; }")
+        btn_clear.clicked.connect(self.clear_transcript)
 
-        self.lbl_uptime = QLabel("Uptime: 0h 0m")
-        self.lbl_uptime.setFont(QFont("Consolas", 8))
-        self.lbl_uptime.setStyleSheet("color: #8bbcdb;")
+        cmd_header.addWidget(lbl_console)
+        cmd_header.addStretch()
+        cmd_header.addWidget(btn_clear)
+        left_layout.addLayout(cmd_header)
 
-        self.lbl_processes = QLabel("Processes: 0")
-        self.lbl_processes.setFont(QFont("Consolas", 8))
-        self.lbl_processes.setStyleSheet("color: #8bbcdb;")
+        self.console_edit = QTextEdit()
+        self.console_edit.setReadOnly(True)
+        left_layout.addWidget(self.console_edit, stretch=4)
 
-        left_layout.addWidget(self.lbl_net_up)
-        left_layout.addWidget(self.lbl_net_down)
-        left_layout.addWidget(self.lbl_uptime)
-        left_layout.addWidget(self.lbl_processes)
-        self.middle_section.addWidget(self.left_panel, stretch=1)
+        # Command Line Prompt
+        input_bar = QHBoxLayout()
+        input_bar.setSpacing(6)
 
-        # CENTER: Arc Reactor Dial Core
+        self.lbl_prompt = QLabel("Aimz:~$")
+        self.lbl_prompt.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.lbl_prompt.setStyleSheet("color: #60c5ba;")
+
+        self.cmd_input = CyberCommandLine()
+        self.cmd_input.setPlaceholderText("Type a prompt or execute command...")
+        self.cmd_input.returnPressed.connect(self.handle_typed_command)
+
+        input_bar.addWidget(self.lbl_prompt)
+        input_bar.addWidget(self.cmd_input)
+        left_layout.addLayout(input_bar)
+
+        self.middle_section.addWidget(self.left_panel, stretch=2)
+
+        # CENTER: Dense Neural Synapse Swarm Core
         center_box = QVBoxLayout()
         center_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.reactor = JarvisArcReactorDial()
+        self.reactor = NeuralSynapseSwarm()
+        self.reactor.clicked_mute.connect(self.toggle_mute)
         center_box.addWidget(self.reactor, alignment=Qt.AlignmentFlag.AlignCenter)
 
         self.status_label = QLabel("SYSTEM STANDBY")
-        self.status_label.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
-        self.status_label.setStyleSheet("color: #00f0ff; letter-spacing: 3px;")
+        self.status_label.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        self.status_label.setStyleSheet("color: #00d2ff; letter-spacing: 3px;")
         center_box.addWidget(self.status_label, alignment=Qt.AlignmentFlag.AlignCenter)
-        self.middle_section.addLayout(center_box, stretch=1)
+        self.middle_section.addLayout(center_box, stretch=2)
 
-        # RIGHT PANEL: Direct Action Dock & Status
+        # RIGHT PANEL: Live Kernel Stream & Chamfered Controls
         self.right_panel = QFrame()
-        self.right_panel.setStyleSheet("QFrame { background: rgba(3, 8, 14, 0.75); border: 1px solid rgba(0,215,255,0.25); border-radius: 10px; padding: 8px; }")
         right_layout = QVBoxLayout(self.right_panel)
-        right_layout.setSpacing(8)
+        right_layout.setContentsMargins(0, 0, 0, 0)
+        right_layout.setSpacing(6)
 
-        action_title = QLabel("TACTICAL DOCK")
-        action_title.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
-        action_title.setStyleSheet("color: #00f0ff; letter-spacing: 1.5px;")
-        right_layout.addWidget(action_title)
+        self.hex_stream = CyberMemoryStreamPanel()
+        right_layout.addWidget(self.hex_stream, stretch=4)
 
-        btn_style = """
-            QPushButton {
-                background: rgba(0, 215, 255, 0.1);
-                border: 1px solid rgba(0, 215, 255, 0.35);
-                border-radius: 6px;
-                color: #a0d4f2;
-                font-size: 10px;
-                font-family: 'Consolas';
-                font-weight: bold;
-                padding: 6px 10px;
-            }
-            QPushButton:hover {
-                background: rgba(0, 215, 255, 0.28);
-                color: #ffffff;
-            }
-        """
-        self.btn_mute = QPushButton("🎙 MUTE INPUT")
-        self.btn_mute.setStyleSheet(btn_style)
-        self.btn_mute.clicked.connect(self.toggle_mute)
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(6)
+        self.btn_desk = CyberChamferButton("⛶ DESKTOP")
+        self.btn_desk.clicked.connect(minimize_all_windows)
 
-        btn_clear = QPushButton("⟲ CLEAR TRANSCRIPT")
-        btn_clear.setStyleSheet(btn_style)
-        btn_clear.clicked.connect(self.clear_transcript)
+        self.btn_lock = CyberChamferButton("🔒 LOCK")
+        self.btn_lock.clicked.connect(lock_workstation)
 
-        btn_media = QPushButton("⏯ MEDIA PLAY/PAUSE")
-        btn_media.setStyleSheet(btn_style)
-        btn_media.clicked.connect(lambda: media_control("play_pause"))
+        btn_row.addWidget(self.btn_desk)
+        btn_row.addWidget(self.btn_lock)
+        right_layout.addLayout(btn_row)
 
-        btn_desk = QPushButton("⛶ SHOW DESKTOP")
-        btn_desk.setStyleSheet(btn_style)
-        btn_desk.clicked.connect(minimize_all_windows)
+        self.middle_section.addWidget(self.right_panel, stretch=2)
+        root_layout.addLayout(self.middle_section, stretch=3)
 
-        btn_lock = QPushButton("🔒 LOCK SYSTEM")
-        btn_lock.setStyleSheet(btn_style)
-        btn_lock.clicked.connect(lock_workstation)
+        # 3. BOTTOM PANEL: Chamfered Oscilloscope Sparklines
+        self.bottom_panel = QFrame()
+        bottom_layout = QHBoxLayout(self.bottom_panel)
+        bottom_layout.setContentsMargins(0, 2, 0, 0)
+        bottom_layout.setSpacing(8)
+        bottom_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        right_layout.addWidget(self.btn_mute)
-        right_layout.addWidget(btn_clear)
-        right_layout.addWidget(btn_media)
-        right_layout.addWidget(btn_desk)
-        right_layout.addWidget(btn_lock)
-        right_layout.addStretch()
+        self.graph_cpu = CyberSparklineGraph("CPU HISTORY")
+        self.graph_ram = CyberSparklineGraph("RAM HISTORY")
+        self.graph_disk = CyberSparklineGraph("DISK HISTORY")
+        self.graph_net_up = CyberSparklineGraph("NET UP")
+        self.graph_net_down = CyberSparklineGraph("NET DOWN")
+        self.graph_uptime = CyberSparklineGraph("UPTIME")
 
-        self.middle_section.addWidget(self.right_panel, stretch=1)
-        root_layout.addLayout(self.middle_section)
-
-        # 3. Bottom Transcripts Dialogue Section
-        self.dialogue_frame = QFrame()
-        self.dialogue_frame.setStyleSheet("""
-            QFrame {
-                background-color: rgba(3, 8, 14, 0.88);
-                border: 1px solid rgba(0, 215, 255, 0.3);
-                border-radius: 10px;
-                padding: 8px;
-            }
-        """)
-        d_layout = QVBoxLayout(self.dialogue_frame)
-        d_layout.setSpacing(4)
-
-        self.user_label = QLabel("Aimz: [Awaiting Input...]")
-        self.user_label.setFont(QFont("Segoe UI", 9))
-        self.user_label.setStyleSheet("color: #7f99b2;")
-        self.user_label.setWordWrap(True)
-
-        self.ai_label = QLabel("E.V.: Online and standing by.")
-        self.ai_label.setFont(QFont("Segoe UI", 9, QFont.Weight.DemiBold))
-        self.ai_label.setStyleSheet("color: #00f0ff;")
-        self.ai_label.setWordWrap(True)
-
-        d_layout.addWidget(self.user_label)
-        d_layout.addWidget(self.ai_label)
-        root_layout.addWidget(self.dialogue_frame)
+        bottom_layout.addWidget(self.graph_cpu)
+        bottom_layout.addWidget(self.graph_ram)
+        bottom_layout.addWidget(self.graph_disk)
+        bottom_layout.addWidget(self.graph_net_up)
+        bottom_layout.addWidget(self.graph_net_down)
+        bottom_layout.addWidget(self.graph_uptime)
+        root_layout.addWidget(self.bottom_panel, stretch=1)
 
         self.setCentralWidget(self.main_container)
 
     # ---------------------------------------------------------
-    # HUD Controller Methods
+    # HUD Parallax & Drag Window Logic
     # ---------------------------------------------------------
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
+            self.is_dragging = True
+            event.accept()
+
+    def mouseMoveEvent(self, event):
+        w = self.width()
+        h = self.height()
+        norm_x = (event.position().x() - (w / 2)) / (w / 2)
+        norm_y = (event.position().y() - (h / 2)) / (h / 2)
+        self.reactor.set_parallax(norm_x, norm_y)
+
+        if event.buttons() == Qt.MouseButton.LeftButton and self.is_dragging:
+            self.move(event.globalPosition().toPoint() - self.drag_position)
+            event.accept()
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.is_dragging = False
+            event.accept()
+
+    def check_typing_status(self):
+        global IS_USER_TYPING, LAST_TYPING_TIME
+        if IS_USER_TYPING and (time.time() - LAST_TYPING_TIME > 1.2):
+            IS_USER_TYPING = False
+
+    def toggle_voice_mode(self):
+        self.worker.voice_silent_mode = not self.worker.voice_silent_mode
+        if self.worker.voice_silent_mode:
+            self.btn_voice_mode.setText("[VOICE: OFF]")
+            self.btn_voice_mode.setStyleSheet("QPushButton { color: #ffb833; background: rgba(255,184,51,0.12); border: 1px solid rgba(255,184,51,0.35); border-radius: 4px; padding: 2px 6px; } QPushButton:hover { background: rgba(255,184,51,0.28); }")
+            self.console_edit.append('<span style="color: #ffb833;">// Stealth Mode: Voice playback muted (text-only).</span>')
+        else:
+            self.btn_voice_mode.setText("[VOICE: ON]")
+            self.btn_voice_mode.setStyleSheet("QPushButton { color: #00ffaa; background: rgba(0,255,170,0.12); border: 1px solid rgba(0,255,170,0.35); border-radius: 4px; padding: 2px 6px; } QPushButton:hover { background: rgba(0,255,170,0.28); }")
+            self.console_edit.append('<span style="color: #00ff8c;">// Standard Mode: Audio voice feedback active.</span>')
+
+    def update_busy_ui(self, is_busy):
+        if is_busy:
+            self.badge_status.setText("[BUSY]")
+            self.badge_status.setStyleSheet("color: #ffb833; background: rgba(255,184,51,0.15); padding: 2px 6px; border-radius: 4px;")
+        else:
+            self.badge_status.setText("[SYS_OK]")
+            self.badge_status.setStyleSheet("color: #00ffaa; background: rgba(0,255,170,0.12); padding: 2px 6px; border-radius: 4px;")
+
+    def handle_typed_command(self):
+        query = self.cmd_input.text().strip()
+        if not query:
+            return
+            
+        if self.worker.is_busy:
+            self.console_edit.append('<span style="color: #ff5566;">// System is currently processing another query. Please wait.</span>')
+            return
+
+        self.cmd_input.add_to_history(query)
+        self.cmd_input.clear()
+        self.worker.submit_text_query(query)
+
     def update_status(self, status):
         self.status_label.setText(f"SYSTEM {status}")
         self.reactor.set_state(status)
+        self.hex_stream.set_state(status)
 
-    def update_user_text(self, text):
-        self.user_label.setText(f"Aimz: {text}")
+        palette = {
+            "STANDBY": QColor(0, 210, 255),
+            "LISTENING": QColor(0, 255, 170),
+            "PROCESSING": QColor(255, 190, 0),
+            "SPEAKING": QColor(0, 160, 255),
+            "MUTED": QColor(130, 140, 150)
+        }
+        self.current_theme = palette.get(status, palette["STANDBY"])
+        hex_c = self.current_theme.name()
 
-    def trigger_ai_typing(self, text):
-        self.typing_target_text = text
-        self.typing_index = 0
-        self.ai_label.setText("E.V.: ")
-        self.typing_timer.start(16)
+        self.title_label.setStyleSheet(f"color: {hex_c}; letter-spacing: 2px;")
+        self.status_label.setStyleSheet(f"color: {hex_c}; letter-spacing: 3px;")
 
-    def stream_text_character(self):
-        if self.typing_index < len(self.typing_target_text):
-            current = self.ai_label.text() + self.typing_target_text[self.typing_index]
-            self.ai_label.setText(current)
-            self.typing_index += 1
+        self.main_container.setStyleSheet(f"""
+            QWidget#Container {{
+                background-color: rgba(6, 12, 20, 0.94);
+                border: 1.5px solid {hex_c}88;
+                border-radius: 18px;
+            }}
+            QFrame {{
+                border: none !important;
+                background: transparent !important;
+            }}
+            QLabel {{
+                font-family: 'Consolas', monospace;
+                border: none !important;
+                background: transparent !important;
+            }}
+            QTextEdit {{
+                background-color: transparent !important;
+                border: none !important;
+                color: {hex_c};
+                font-family: 'Consolas', monospace;
+                font-size: 11px;
+                padding: 4px;
+            }}
+            QLineEdit {{
+                background-color: rgba(4, 10, 18, 140);
+                border: 1px solid {hex_c}66;
+                border-radius: 4px;
+                color: {hex_c};
+                font-family: 'Consolas', monospace;
+                font-size: 10px;
+                padding: 4px 8px;
+            }}
+            QLineEdit:focus {{
+                border: 1px solid {hex_c};
+                background-color: rgba(4, 10, 18, 200);
+            }}
+        """)
+
+        self.hex_stream.set_theme_color(self.current_theme)
+        self.btn_desk.set_theme_color(self.current_theme)
+        self.btn_lock.set_theme_color(self.current_theme)
+        self.graph_cpu.set_theme_color(self.current_theme)
+        self.graph_ram.set_theme_color(self.current_theme)
+        self.graph_disk.set_theme_color(self.current_theme)
+        self.graph_net_up.set_theme_color(self.current_theme)
+        self.graph_net_down.set_theme_color(self.current_theme)
+        self.graph_uptime.set_theme_color(self.current_theme)
+
+    def append_user_transcript(self, text):
+        self.console_edit.append(f'<span style="color: #60c5ba; font-weight: bold;">Aimz&gt;</span> {text}')
+        self.console_edit.verticalScrollBar().setValue(self.console_edit.verticalScrollBar().maximum())
+
+    # ---------------------------------------------------------
+    # Synchronized Typewriter Stream Slots
+    # ---------------------------------------------------------
+    def handle_stream_start(self):
+        cursor = self.console_edit.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.console_edit.setTextCursor(cursor)
+        self.console_edit.insertHtml('<span style="color: #00f0ff; font-weight: bold;">E.V&gt;</span> ')
+        self.console_edit.verticalScrollBar().setValue(self.console_edit.verticalScrollBar().maximum())
+
+    def handle_stream_word(self, word):
+        cursor = self.console_edit.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.console_edit.setTextCursor(cursor)
+        self.console_edit.insertHtml(f'<span style="color: #00f0ff;">{word}</span>')
+        self.console_edit.verticalScrollBar().setValue(self.console_edit.verticalScrollBar().maximum())
+
+    def handle_stream_end(self):
+        cursor = self.console_edit.textCursor()
+        cursor.movePosition(QTextCursor.MoveOperation.End)
+        self.console_edit.setTextCursor(cursor)
+        self.console_edit.insertHtml('<br>')
+        self.console_edit.verticalScrollBar().setValue(self.console_edit.verticalScrollBar().maximum())
+
+    def clear_transcript(self):
+        self.console_edit.clear()
+        self.console_edit.append('<span style="color: #8899a6;">// Terminal feed cleared.</span>')
+
+    def toggle_mute(self):
+        self.worker.is_muted = not self.worker.is_muted
+        if self.worker.is_muted:
+            self.update_status("MUTED")
+            self.console_edit.append('<span style="color: #ff5566;">// Audio input stream MUTED.</span>')
         else:
-            self.typing_timer.stop()
+            self.update_status("STANDBY")
+            self.console_edit.append('<span style="color: #00ff8c;">// Audio input stream ACTIVE.</span>')
 
     def update_telemetry(self):
-        global LAST_NET_IO, LAST_NET_TIME
+        global LAST_NET_IO, LAST_NET_TIME, NET_UP_SPEED, NET_DOWN_SPEED
         
-        # Clock & Date
         now = datetime.datetime.now()
         self.time_label.setText(now.strftime("%Y-%m-%d  %H:%M:%S"))
 
         # CPU
         cpu = int(psutil.cpu_percent())
-        self.bar_cpu.setValue(cpu)
-        self.lbl_cpu_text.setText(f"CPU Usage: {cpu}%")
+        self.graph_cpu.add_data_point(cpu, subtext=f"{cpu}%")
 
         # RAM
         ram = psutil.virtual_memory()
-        used_ram = round(ram.used / (1024**3), 2)
-        total_ram = round(ram.total / (1024**3), 2)
-        self.bar_ram.setValue(int(ram.percent))
-        self.lbl_ram_text.setText(f"RAM: {used_ram}G / {total_ram}G - {int(ram.percent)}%")
+        used_ram = round(ram.used / (1024**3), 1)
+        self.graph_ram.add_data_point(ram.percent, subtext=f"{used_ram}G")
 
         # Disk
         try:
             disk = psutil.disk_usage('/')
-            used_disk = round(disk.used / (1024**3), 1)
-            total_disk = round(disk.total / (1024**3), 1)
-            self.bar_disk.setValue(int(disk.percent))
-            self.lbl_disk_text.setText(f"Disk Usage: {used_disk}G / {total_disk}G")
+            self.graph_disk.add_data_point(disk.percent, subtext=f"{int(disk.percent)}%")
         except Exception:
             pass
 
-        # Network Traffic Speed
+        # Network Speeds
         cur_net = psutil.net_io_counters()
         cur_time = time.time()
         dt = max(1e-5, cur_time - LAST_NET_TIME)
         
-        up_speed = round((cur_net.bytes_sent - LAST_NET_IO.bytes_sent) / 1024 / dt, 1)
-        down_speed = round((cur_net.bytes_recv - LAST_NET_IO.bytes_recv) / 1024 / dt, 1)
+        NET_UP_SPEED = round((cur_net.bytes_sent - LAST_NET_IO.bytes_sent) / 1024 / dt, 1)
+        NET_DOWN_SPEED = round((cur_net.bytes_recv - LAST_NET_IO.bytes_recv) / 1024 / dt, 1)
         
         LAST_NET_IO = cur_net
         LAST_NET_TIME = cur_time
         
-        self.lbl_net_up.setText(f"Network Up: {up_speed} KB/s")
-        self.lbl_net_down.setText(f"Network Down: {down_speed} KB/s")
+        self.graph_net_up.add_data_point(min(100.0, (NET_UP_SPEED / 1500.0) * 100), subtext=f"{int(NET_UP_SPEED)}K")
+        self.graph_net_down.add_data_point(min(100.0, (NET_DOWN_SPEED / 3000.0) * 100), subtext=f"{int(NET_DOWN_SPEED)}K")
 
-        # Uptime & Processes
+        # Actual PC Uptime
         uptime_sec = int(time.time() - START_TIME)
         hrs, rem = divmod(uptime_sec, 3600)
         mins, _ = divmod(rem, 60)
-        self.lbl_uptime.setText(f"Uptime: {hrs}h {mins}m")
-        self.lbl_processes.setText(f"Processes: {len(psutil.pids())}")
-
-    def toggle_mute(self):
-        self.worker.is_muted = not self.worker.is_muted
-        if self.worker.is_muted:
-            self.btn_mute.setText("🔇 UNMUTE INPUT")
-            self.btn_mute.setStyleSheet("QPushButton { background: rgba(255, 60, 90, 0.25); border: 1px solid #ff3c5a; color: #ffffff; border-radius: 6px; font-size: 10px; font-weight: bold; padding: 6px 10px; }")
-            self.update_status("MUTED")
-        else:
-            self.btn_mute.setText("🎙 MUTE INPUT")
-            self.btn_mute.setStyleSheet("QPushButton { background: rgba(0, 215, 255, 0.1); border: 1px solid rgba(0, 215, 255, 0.35); border-radius: 6px; color: #a0d4f2; font-size: 10px; font-weight: bold; padding: 6px 10px; }")
-            self.update_status("STANDBY")
-
-    def clear_transcript(self):
-        self.user_label.setText("Aimz: [Awaiting Input...]")
-        self.ai_label.setText("E.V.: Ready for command.")
+        self.graph_uptime.add_data_point(min(100, (uptime_sec / 86400) * 100), subtext=f"{hrs}h {mins}m")
 
     def toggle_compact_mode(self):
         self.is_compact = not self.is_compact
         if self.is_compact:
             self.left_panel.hide()
             self.right_panel.hide()
-            self.dialogue_frame.hide()
+            self.bottom_panel.hide()
             self.setFixedSize(360, 420)
         else:
             self.left_panel.show()
             self.right_panel.show()
-            self.dialogue_frame.show()
-            self.setFixedSize(920, 580)
-
-    # Holographic Corner Targeting Reticles
-    def paintEvent(self, event):
-        painter = QPainter(self)
-        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-        
-        pen = QPen(QColor(0, 240, 255, 200), 2)
-        painter.setPen(pen)
-
-        w = self.width()
-        h = self.height()
-        c_len = 18
-
-        # Top-Left Reticle
-        painter.drawLine(10, 10 + c_len, 10, 10)
-        painter.drawLine(10, 10, 10 + c_len, 10)
-
-        # Top-Right Reticle
-        painter.drawLine(w - 10 - c_len, 10, w - 10, 10)
-        painter.drawLine(w - 10, 10, w - 10, 10 + c_len)
-
-        # Bottom-Left Reticle
-        painter.drawLine(10, h - 10 - c_len, 10, h - 10)
-        painter.drawLine(10, h - 10, 10 + c_len, h - 10)
-
-        # Bottom-Right Reticle
-        painter.drawLine(w - 10 - c_len, h - 10, w - 10, h - 10)
-        painter.drawLine(w - 10, h - 10 - c_len, w - 10, h - 10)
-
-    # Draggable Window Logic
-    def mousePressEvent(self, event):
-        if event.button() == Qt.MouseButton.LeftButton:
-            self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
-            event.accept()
-
-    def mouseMoveEvent(self, event):
-        if event.buttons() == Qt.MouseButton.LeftButton:
-            self.move(event.globalPosition().toPoint() - self.drag_position)
-            event.accept()
+            self.bottom_panel.show()
+            self.setFixedSize(1060, 610)
 
     def close_application(self):
         self.worker.is_running = False
@@ -1123,6 +1689,6 @@ class JarvisHUD(QMainWindow):
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
-    hud = JarvisHUD()
+    hud = JarvisWidescreenHUD()
     hud.show()
     sys.exit(app.exec())
