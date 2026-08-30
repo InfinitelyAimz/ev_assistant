@@ -7,6 +7,7 @@ import platform
 import webbrowser
 import subprocess
 import time
+import datetime
 import ctypes
 import math
 import warnings
@@ -32,7 +33,7 @@ from pycaw.pycaw import AudioUtilities
 
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QVBoxLayout, 
-    QHBoxLayout, QLabel, QFrame, QPushButton, QProgressBar
+    QHBoxLayout, QLabel, QFrame, QPushButton, QProgressBar, QGridLayout
 )
 from PyQt6.QtCore import Qt, QThread, pyqtSignal, QTimer, QPoint
 from PyQt6.QtGui import (
@@ -53,6 +54,9 @@ except Exception:
 
 # Global audio visualizer energy levels
 CURRENT_MIC_RMS = 0.0
+START_TIME = time.time()
+LAST_NET_IO = psutil.net_io_counters()
+LAST_NET_TIME = time.time()
 
 # -------------------------------------------------------------
 # 1. VOICE ENGINE (PIPER TTS & WHISPER STT)
@@ -84,8 +88,6 @@ def speak(text, worker_ref=None):
 
             if raw_pcm_data and len(raw_pcm_data) > 0:
                 audio_array = np.frombuffer(raw_pcm_data, dtype=np.int16)
-                
-                # Start non-blocking playback while driving visualizer
                 sd.play(audio_array, samplerate=16000)
                 chunk_len = 1024
                 for i in range(0, len(audio_array), chunk_len):
@@ -499,8 +501,8 @@ class AssistantWorker(QThread):
 
     def run(self):
         self.status_changed.emit("SPEAKING")
-        self.ai_response_generated.emit("Visual interface initialized. All systems nominal.")
-        speak("Visual interface initialized. All systems nominal.", self)
+        self.ai_response_generated.emit("Visual diagnostics online. Tactical HUD initialized.")
+        speak("Visual diagnostics online. Tactical HUD initialized.", self)
         self.status_changed.emit("STANDBY")
 
         system_prompt = {
@@ -554,7 +556,6 @@ class AssistantWorker(QThread):
                     self.status_changed.emit("STANDBY")
                     continue
 
-                # Live Search / LLaMA Fallback
                 needs_search = any(trigger in clean_input for trigger in SEARCH_TRIGGERS)
                 search_context = ""
                 if needs_search:
@@ -581,40 +582,44 @@ class AssistantWorker(QThread):
                 self.status_changed.emit("STANDBY")
 
 # -------------------------------------------------------------
-# 4. ADVANCED HOLOGRAPHIC & AUDIO VISUALIZER CORE
+# 4. ADVANCED J.A.R.V.I.S. ARC REACTOR HUD DIAL
 # -------------------------------------------------------------
-class HolographicArcReactor(QWidget):
-    """Futuristic Arc Reactor with dynamic live waveform audio reactivity."""
+class JarvisArcReactorDial(QWidget):
+    """Multi-ring sci-fi cybernetic Arc Reactor dial with animated rings & visualizer."""
     def __init__(self, parent=None):
         super().__init__(parent)
-        self.setFixedSize(200, 200)
-        self.angle = 0
+        self.setFixedSize(310, 310)
+        self.angle_outer = 0.0
+        self.angle_mid = 0.0
+        self.angle_inner = 0.0
         self.state = "STANDBY"
-        self.bars = 32
+        
+        self.bars = 36
         self.audio_levels = [0.0] * self.bars
         
         self.timer = QTimer(self)
-        self.timer.timeout.connect(self.update_frame)
+        self.timer.timeout.connect(self.update_animation)
         self.timer.start(25)
 
     def set_state(self, state):
         self.state = state
 
-    def update_frame(self):
+    def update_animation(self):
         global CURRENT_MIC_RMS
-        self.angle = (self.angle + (5.0 if self.state == "PROCESSING" else 1.2)) % 360
+        speed_mult = 3.5 if self.state == "PROCESSING" else (2.0 if self.state == "SPEAKING" else 1.0)
+        self.angle_outer = (self.angle_outer + 0.8 * speed_mult) % 360
+        self.angle_mid = (self.angle_mid - 1.4 * speed_mult) % 360
+        self.angle_inner = (self.angle_inner + 2.2 * speed_mult) % 360
         
-        # Scale RMS into normalized amplitude range
-        target_amp = min(1.0, CURRENT_MIC_RMS / 2500.0)
+        target_amp = min(1.0, CURRENT_MIC_RMS / 2400.0)
         if self.state in ["LISTENING", "SPEAKING"]:
-            target_amp = max(0.15, target_amp)
+            target_amp = max(0.18, target_amp)
         else:
-            target_amp = 0.05
+            target_amp = 0.04
 
-        # Smooth waveform decay & wave shift
         for i in range(self.bars):
-            variation = math.sin((self.angle * 0.05) + (i * 0.4)) * 0.25
-            val = max(0.05, target_amp + variation)
+            var = math.sin((self.angle_outer * 0.08) + (i * 0.45)) * 0.22
+            val = max(0.04, target_amp + var)
             self.audio_levels[i] += (val - self.audio_levels[i]) * 0.35
             
         self.update()
@@ -625,69 +630,104 @@ class HolographicArcReactor(QWidget):
 
         cx, cy = self.width() / 2, self.height() / 2
 
-        # State palettes
+        # State color mappings
         colors = {
-            "STANDBY": (QColor(0, 210, 255), QColor(0, 210, 255, 30)),
-            "LISTENING": (QColor(0, 255, 170), QColor(0, 255, 170, 70)),
-            "PROCESSING": (QColor(255, 190, 0), QColor(255, 190, 0, 70)),
-            "SPEAKING": (QColor(0, 160, 255), QColor(0, 160, 255, 80))
+            "STANDBY": (QColor(0, 215, 255), QColor(0, 215, 255, 30)),
+            "LISTENING": (QColor(0, 255, 170), QColor(0, 255, 170, 60)),
+            "PROCESSING": (QColor(255, 185, 0), QColor(255, 185, 0, 60)),
+            "SPEAKING": (QColor(0, 165, 255), QColor(0, 165, 255, 75)),
+            "MUTED": (QColor(255, 60, 90), QColor(255, 60, 90, 50))
         }
         primary, glow = colors.get(self.state, colors["STANDBY"])
 
-        # 1. Holographic Outer Radial Glow
-        grad = QRadialGradient(cx, cy, 95)
-        grad.setColorAt(0.0, glow)
-        grad.setColorAt(1.0, QColor(0, 0, 0, 0))
-        painter.setBrush(QBrush(grad))
+        # 1. Background Radial Glow
+        bg_grad = QRadialGradient(cx, cy, 145)
+        bg_grad.setColorAt(0.0, glow)
+        bg_grad.setColorAt(0.7, QColor(0, 0, 0, 100))
+        bg_grad.setColorAt(1.0, QColor(0, 0, 0, 0))
+        painter.setBrush(QBrush(bg_grad))
         painter.setPen(Qt.PenStyle.NoPen)
         painter.drawEllipse(0, 0, self.width(), self.height())
 
-        # 2. Live Radial Audio Visualizer Bars
+        # 2. Outer Segmented Tick Ring (Image 1 style)
         painter.save()
         painter.translate(cx, cy)
-        radius = 58
+        painter.rotate(self.angle_outer * 0.4)
+        num_ticks = 48
+        for i in range(num_ticks):
+            is_major = (i % 4 == 0)
+            t_len = 8 if is_major else 4
+            t_pen = QPen(primary if is_major else QColor(0, 215, 255, 100), 1.8 if is_major else 1.0)
+            painter.setPen(t_pen)
+            painter.drawLine(0, 142, 0, 142 - t_len)
+            painter.rotate(360 / num_ticks)
+        painter.restore()
+
+        # 3. Outer Arcs & Crosshair Reticles
+        pen = QPen(primary, 2, Qt.PenStyle.DashLine)
+        painter.setPen(pen)
+        painter.drawArc(int(cx - 128), int(cy - 128), 256, 256, int(self.angle_outer * 16), 110 * 16)
+        painter.drawArc(int(cx - 128), int(cy - 128), 256, 256, int((self.angle_outer + 180) * 16), 110 * 16)
+
+        # 4. Radial Audio Visualizer Spikes
+        painter.save()
+        painter.translate(cx, cy)
+        r_inner = 88
         for i in range(self.bars):
-            rot = (360.0 / self.bars) * i + self.angle * 0.5
+            rot = (360.0 / self.bars) * i + self.angle_mid
             painter.save()
             painter.rotate(rot)
-            bar_len = 5 + (self.audio_levels[i] * 32)
-            
+            bar_len = 4 + (self.audio_levels[i] * 34)
             pen = QPen(primary, 2.5, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
             painter.setPen(pen)
-            painter.drawLine(0, int(radius), 0, int(radius + bar_len))
+            painter.drawLine(0, int(r_inner), 0, int(r_inner + bar_len))
             painter.restore()
         painter.restore()
 
-        # 3. Concentric Orbit Rings
-        pen = QPen(primary, 1.5, Qt.PenStyle.DashLine)
+        # 5. Mid Segmented Chevron/Hazard Ring
+        pen = QPen(QColor(0, 215, 255, 160), 1.5, Qt.PenStyle.DotLine)
         painter.setPen(pen)
-        painter.drawArc(int(cx - 52), int(cy - 52), 104, 104, int(self.angle * 16), 120 * 16)
-        painter.drawArc(int(cx - 52), int(cy - 52), 104, 104, int((self.angle + 180) * 16), 120 * 16)
+        painter.drawEllipse(int(cx - 82), int(cy - 82), 164, 164)
 
-        # 4. Central Solid Reactor Core
-        core_grad = QRadialGradient(cx, cy, 28)
-        core_grad.setColorAt(0.0, QColor(255, 255, 255, 250))
-        core_grad.setColorAt(0.5, primary)
-        core_grad.setColorAt(1.0, QColor(6, 14, 24, 200))
+        # 6. Inner Fast Counter-Rotating Arcs
+        pen_inner = QPen(primary, 2.5, Qt.PenStyle.SolidLine)
+        painter.setPen(pen_inner)
+        painter.drawArc(int(cx - 62), int(cy - 62), 124, 124, int(self.angle_inner * 16), 75 * 16)
+        painter.drawArc(int(cx - 62), int(cy - 62), 124, 124, int((self.angle_inner + 180) * 16), 75 * 16)
+
+        # 7. Central Core Reactor Badge
+        core_grad = QRadialGradient(cx, cy, 38)
+        core_grad.setColorAt(0.0, QColor(255, 255, 255, 255))
+        core_grad.setColorAt(0.4, primary)
+        core_grad.setColorAt(1.0, QColor(4, 10, 18, 230))
         painter.setBrush(QBrush(core_grad))
-        painter.setPen(QPen(primary, 1.2))
-        painter.drawEllipse(int(cx - 26), int(cy - 26), 52, 52)
+        painter.setPen(QPen(primary, 1.5))
+        painter.drawEllipse(int(cx - 38), int(cy - 38), 76, 76)
+
+        # 8. Center Label / State Code
+        painter.setPen(QPen(QColor(255, 255, 255, 220)))
+        painter.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+        display_code = "E.V." if self.state == "STANDBY" else self.state[:4]
+        painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, display_code)
 
 
+# -------------------------------------------------------------
+# 5. FULL TACTICAL J.A.R.V.I.S. HUD DASHBOARD
+# -------------------------------------------------------------
 class JarvisHUD(QMainWindow):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("E.V. Neural Interface")
-        self.setFixedSize(580, 560)
+        self.setWindowTitle("J.A.R.V.I.S. Tactical Neural HUD")
+        self.setFixedSize(920, 580)
         
-        # Transparent Frameless Holographic Window
+        # Transparent Frameless Window
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
         self.drag_position = QPoint()
         self.is_compact = False
         
-        # Streaming text animation state
+        # Typewriter text streaming state
         self.typing_target_text = ""
         self.typing_index = 0
         self.typing_timer = QTimer(self)
@@ -702,7 +742,7 @@ class JarvisHUD(QMainWindow):
         self.worker.ai_response_generated.connect(self.trigger_ai_typing)
         self.worker.start()
 
-        # Telemetry Timer
+        # Real-time System Telemetry Timer
         self.stats_timer = QTimer(self)
         self.stats_timer.timeout.connect(self.update_telemetry)
         self.stats_timer.start(1000)
@@ -713,122 +753,205 @@ class JarvisHUD(QMainWindow):
         self.main_container.setObjectName("Container")
         self.main_container.setStyleSheet("""
             QWidget#Container {
-                background-color: rgba(6, 12, 20, 0.94);
-                border: 1.5px solid rgba(0, 210, 255, 0.5);
-                border-radius: 20px;
+                background-color: rgba(6, 11, 18, 0.94);
+                border: 1.5px solid rgba(0, 215, 255, 0.5);
+                border-radius: 18px;
             }
             QLabel {
-                font-family: 'Consolas', 'Segoe UI';
+                font-family: 'Consolas', 'Segoe UI', monospace;
             }
             QProgressBar {
-                border: 1px solid rgba(0, 210, 255, 0.3);
-                border-radius: 4px;
-                background-color: rgba(10, 20, 32, 0.8);
-                text-align: center;
-                color: #00d2ff;
-                font-size: 10px;
+                border: 1px solid rgba(0, 215, 255, 0.35);
+                border-radius: 3px;
+                background-color: rgba(4, 8, 14, 0.9);
+                text-align: right;
+                padding-right: 4px;
+                color: #00f0ff;
+                font-size: 9px;
                 font-family: 'Consolas';
                 font-weight: bold;
             }
             QProgressBar::chunk {
-                background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #0066aa, stop:1 #00f0ff);
-                border-radius: 3px;
+                background-color: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #005588, stop:1 #00f0ff);
+                border-radius: 2px;
             }
         """)
 
-        layout = QVBoxLayout(self.main_container)
-        layout.setContentsMargins(22, 18, 22, 18)
-        layout.setSpacing(10)
+        root_layout = QVBoxLayout(self.main_container)
+        root_layout.setContentsMargins(20, 16, 20, 16)
+        root_layout.setSpacing(10)
 
-        # 1. Top Bar: Hologram Header & Control Buttons
+        # 1. Top HUD Header
         top_bar = QHBoxLayout()
-        title_label = QLabel("E.V. NEURAL HUD // MARK-V")
-        title_label.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
-        title_label.setStyleSheet("color: #00f0ff; letter-spacing: 2px;")
+        title_label = QLabel("MARK-VII // E.V. TACTICAL SYSTEM MONITOR")
+        title_label.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
+        title_label.setStyleSheet("color: #00f0ff; letter-spacing: 2.5px;")
         
+        self.time_label = QLabel()
+        self.time_label.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
+        self.time_label.setStyleSheet("color: #00d7ff;")
+
         btn_compact = QPushButton("▫")
         btn_compact.setToolTip("Toggle Compact Mode")
         btn_compact.setFixedSize(26, 26)
-        btn_compact.setStyleSheet("QPushButton { color: #00d2ff; background: rgba(0,210,255,0.1); border: 1px solid rgba(0,210,255,0.4); border-radius: 13px; font-weight: bold; } QPushButton:hover { background: rgba(0,210,255,0.3); }")
+        btn_compact.setStyleSheet("QPushButton { color: #00d7ff; background: rgba(0,215,255,0.12); border: 1px solid rgba(0,215,255,0.4); border-radius: 13px; font-weight: bold; } QPushButton:hover { background: rgba(0,215,255,0.3); }")
         btn_compact.clicked.connect(self.toggle_compact_mode)
 
         btn_close = QPushButton("✕")
         btn_close.setToolTip("Shutdown Assistant")
         btn_close.setFixedSize(26, 26)
-        btn_close.setStyleSheet("QPushButton { color: #ff5566; background: rgba(255,85,102,0.1); border: 1px solid rgba(255,85,102,0.4); border-radius: 13px; font-weight: bold; } QPushButton:hover { background: rgba(255,85,102,0.3); }")
+        btn_close.setStyleSheet("QPushButton { color: #ff5566; background: rgba(255,85,102,0.12); border: 1px solid rgba(255,85,102,0.4); border-radius: 13px; font-weight: bold; } QPushButton:hover { background: rgba(255,85,102,0.3); }")
         btn_close.clicked.connect(self.close_application)
 
         top_bar.addWidget(title_label)
         top_bar.addStretch()
+        top_bar.addWidget(self.time_label)
+        top_bar.addSpacing(12)
         top_bar.addWidget(btn_compact)
         top_bar.addWidget(btn_close)
-        layout.addLayout(top_bar)
+        root_layout.addLayout(top_bar)
 
-        # 2. Holographic Center Core
-        self.center_widget = QWidget()
-        center_layout = QVBoxLayout(self.center_widget)
-        center_layout.setContentsMargins(0, 0, 0, 0)
-        center_layout.setSpacing(6)
-        center_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        # 2. Main Middle Section (Arc Reactor Center + Telemetry Side-Panels)
+        self.middle_section = QHBoxLayout()
+        self.middle_section.setSpacing(16)
 
-        self.reactor = HolographicArcReactor()
-        center_layout.addWidget(self.reactor, alignment=Qt.AlignmentFlag.AlignCenter)
+        # LEFT PANEL: System Monitor & Network Gauges (Image 2 style)
+        self.left_panel = QFrame()
+        self.left_panel.setStyleSheet("QFrame { background: rgba(3, 8, 14, 0.75); border: 1px solid rgba(0,215,255,0.25); border-radius: 10px; padding: 8px; }")
+        left_layout = QVBoxLayout(self.left_panel)
+        left_layout.setSpacing(6)
+
+        panel_title = QLabel("SYSTEM METRICS")
+        panel_title.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+        panel_title.setStyleSheet("color: #00f0ff; letter-spacing: 1.5px;")
+        left_layout.addWidget(panel_title)
+
+        # CPU Progress
+        self.lbl_cpu_text = QLabel("CPU Usage: 0%")
+        self.lbl_cpu_text.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.lbl_cpu_text.setStyleSheet("color: #00d7ff;")
+        self.bar_cpu = QProgressBar()
+        self.bar_cpu.setFixedHeight(12)
+        left_layout.addWidget(self.lbl_cpu_text)
+        left_layout.addWidget(self.bar_cpu)
+
+        # RAM Progress
+        self.lbl_ram_text = QLabel("RAM: 0.0G / 0.0G (0%)")
+        self.lbl_ram_text.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.lbl_ram_text.setStyleSheet("color: #00d7ff;")
+        self.bar_ram = QProgressBar()
+        self.bar_ram.setFixedHeight(12)
+        left_layout.addWidget(self.lbl_ram_text)
+        left_layout.addWidget(self.bar_ram)
+
+        # Disk Usage Progress
+        self.lbl_disk_text = QLabel("Disk Usage: 0.0G / 0.0G")
+        self.lbl_disk_text.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.lbl_disk_text.setStyleSheet("color: #00d7ff;")
+        self.bar_disk = QProgressBar()
+        self.bar_disk.setFixedHeight(12)
+        left_layout.addWidget(self.lbl_disk_text)
+        left_layout.addWidget(self.bar_disk)
+
+        # Network / Process Readout
+        self.lbl_net_up = QLabel("Network Up: 0 KB/s")
+        self.lbl_net_up.setFont(QFont("Consolas", 8))
+        self.lbl_net_up.setStyleSheet("color: #8bbcdb;")
+        
+        self.lbl_net_down = QLabel("Network Down: 0 KB/s")
+        self.lbl_net_down.setFont(QFont("Consolas", 8))
+        self.lbl_net_down.setStyleSheet("color: #8bbcdb;")
+
+        self.lbl_uptime = QLabel("Uptime: 0h 0m")
+        self.lbl_uptime.setFont(QFont("Consolas", 8))
+        self.lbl_uptime.setStyleSheet("color: #8bbcdb;")
+
+        self.lbl_processes = QLabel("Processes: 0")
+        self.lbl_processes.setFont(QFont("Consolas", 8))
+        self.lbl_processes.setStyleSheet("color: #8bbcdb;")
+
+        left_layout.addWidget(self.lbl_net_up)
+        left_layout.addWidget(self.lbl_net_down)
+        left_layout.addWidget(self.lbl_uptime)
+        left_layout.addWidget(self.lbl_processes)
+        self.middle_section.addWidget(self.left_panel, stretch=1)
+
+        # CENTER: Arc Reactor Dial Core
+        center_box = QVBoxLayout()
+        center_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.reactor = JarvisArcReactorDial()
+        center_box.addWidget(self.reactor, alignment=Qt.AlignmentFlag.AlignCenter)
 
         self.status_label = QLabel("SYSTEM STANDBY")
         self.status_label.setFont(QFont("Consolas", 11, QFont.Weight.Bold))
-        self.status_label.setStyleSheet("color: #00d2ff; letter-spacing: 3px;")
-        center_layout.addWidget(self.status_label, alignment=Qt.AlignmentFlag.AlignCenter)
-        layout.addWidget(self.center_widget)
+        self.status_label.setStyleSheet("color: #00f0ff; letter-spacing: 3px;")
+        center_box.addWidget(self.status_label, alignment=Qt.AlignmentFlag.AlignCenter)
+        self.middle_section.addLayout(center_box, stretch=1)
 
-        # 3. Interactive Quick-Control Action Dock
-        self.dock_layout = QHBoxLayout()
-        self.dock_layout.setSpacing(8)
+        # RIGHT PANEL: Direct Action Dock & Status
+        self.right_panel = QFrame()
+        self.right_panel.setStyleSheet("QFrame { background: rgba(3, 8, 14, 0.75); border: 1px solid rgba(0,215,255,0.25); border-radius: 10px; padding: 8px; }")
+        right_layout = QVBoxLayout(self.right_panel)
+        right_layout.setSpacing(8)
+
+        action_title = QLabel("TACTICAL DOCK")
+        action_title.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
+        action_title.setStyleSheet("color: #00f0ff; letter-spacing: 1.5px;")
+        right_layout.addWidget(action_title)
 
         btn_style = """
             QPushButton {
-                background: rgba(0, 210, 255, 0.08);
-                border: 1px solid rgba(0, 210, 255, 0.3);
+                background: rgba(0, 215, 255, 0.1);
+                border: 1px solid rgba(0, 215, 255, 0.35);
                 border-radius: 6px;
-                color: #a0c4e2;
+                color: #a0d4f2;
                 font-size: 10px;
                 font-family: 'Consolas';
                 font-weight: bold;
-                padding: 5px 8px;
+                padding: 6px 10px;
             }
             QPushButton:hover {
-                background: rgba(0, 210, 255, 0.25);
+                background: rgba(0, 215, 255, 0.28);
                 color: #ffffff;
             }
         """
-        self.btn_mute = QPushButton("🎙 MUTE")
+        self.btn_mute = QPushButton("🎙 MUTE INPUT")
         self.btn_mute.setStyleSheet(btn_style)
         self.btn_mute.clicked.connect(self.toggle_mute)
 
-        btn_clear = QPushButton("⟲ CLEAR")
+        btn_clear = QPushButton("⟲ CLEAR TRANSCRIPT")
         btn_clear.setStyleSheet(btn_style)
         btn_clear.clicked.connect(self.clear_transcript)
 
-        btn_play = QPushButton("⏯ MEDIA")
-        btn_play.setStyleSheet(btn_style)
-        btn_play.clicked.connect(lambda: media_control("play_pause"))
+        btn_media = QPushButton("⏯ MEDIA PLAY/PAUSE")
+        btn_media.setStyleSheet(btn_style)
+        btn_media.clicked.connect(lambda: media_control("play_pause"))
 
-        btn_desk = QPushButton("⛶ DESKTOP")
+        btn_desk = QPushButton("⛶ SHOW DESKTOP")
         btn_desk.setStyleSheet(btn_style)
         btn_desk.clicked.connect(minimize_all_windows)
 
-        self.dock_layout.addWidget(self.btn_mute)
-        self.dock_layout.addWidget(btn_clear)
-        self.dock_layout.addWidget(btn_play)
-        self.dock_layout.addWidget(btn_desk)
-        layout.addLayout(self.dock_layout)
+        btn_lock = QPushButton("🔒 LOCK SYSTEM")
+        btn_lock.setStyleSheet(btn_style)
+        btn_lock.clicked.connect(lock_workstation)
 
-        # 4. Terminal Transcripts (Streaming text)
+        right_layout.addWidget(self.btn_mute)
+        right_layout.addWidget(btn_clear)
+        right_layout.addWidget(btn_media)
+        right_layout.addWidget(btn_desk)
+        right_layout.addWidget(btn_lock)
+        right_layout.addStretch()
+
+        self.middle_section.addWidget(self.right_panel, stretch=1)
+        root_layout.addLayout(self.middle_section)
+
+        # 3. Bottom Transcripts Dialogue Section
         self.dialogue_frame = QFrame()
         self.dialogue_frame.setStyleSheet("""
             QFrame {
-                background-color: rgba(3, 8, 14, 0.85);
-                border: 1px solid rgba(0, 210, 255, 0.25);
-                border-radius: 8px;
+                background-color: rgba(3, 8, 14, 0.88);
+                border: 1px solid rgba(0, 215, 255, 0.3);
+                border-radius: 10px;
                 padding: 8px;
             }
         """)
@@ -847,51 +970,7 @@ class JarvisHUD(QMainWindow):
 
         d_layout.addWidget(self.user_label)
         d_layout.addWidget(self.ai_label)
-        layout.addWidget(self.dialogue_frame)
-
-        # 5. System Resource Progress Bars
-        self.telemetry_widget = QWidget()
-        t_layout = QHBoxLayout(self.telemetry_widget)
-        t_layout.setContentsMargins(0, 2, 0, 2)
-        t_layout.setSpacing(8)
-
-        # CPU Progress
-        cpu_box = QVBoxLayout()
-        cpu_box.setSpacing(2)
-        lbl_cpu = QLabel("CPU LOAD")
-        lbl_cpu.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
-        lbl_cpu.setStyleSheet("color: #00d2ff;")
-        self.bar_cpu = QProgressBar()
-        self.bar_cpu.setFixedHeight(14)
-        cpu_box.addWidget(lbl_cpu)
-        cpu_box.addWidget(self.bar_cpu)
-
-        # RAM Progress
-        ram_box = QVBoxLayout()
-        ram_box.setSpacing(2)
-        lbl_ram = QLabel("RAM USAGE")
-        lbl_ram.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
-        lbl_ram.setStyleSheet("color: #00d2ff;")
-        self.bar_ram = QProgressBar()
-        self.bar_ram.setFixedHeight(14)
-        ram_box.addWidget(lbl_ram)
-        ram_box.addWidget(self.bar_ram)
-
-        # Battery Progress
-        bat_box = QVBoxLayout()
-        bat_box.setSpacing(2)
-        lbl_bat = QLabel("BATTERY")
-        lbl_bat.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
-        lbl_bat.setStyleSheet("color: #00d2ff;")
-        self.bar_bat = QProgressBar()
-        self.bar_bat.setFixedHeight(14)
-        bat_box.addWidget(lbl_bat)
-        bat_box.addWidget(self.bar_bat)
-
-        t_layout.addLayout(cpu_box)
-        t_layout.addLayout(ram_box)
-        t_layout.addLayout(bat_box)
-        layout.addWidget(self.telemetry_widget)
+        root_layout.addWidget(self.dialogue_frame)
 
         self.setCentralWidget(self.main_container)
 
@@ -909,7 +988,7 @@ class JarvisHUD(QMainWindow):
         self.typing_target_text = text
         self.typing_index = 0
         self.ai_label.setText("E.V.: ")
-        self.typing_timer.start(18)
+        self.typing_timer.start(16)
 
     def stream_text_character(self):
         if self.typing_index < len(self.typing_target_text):
@@ -920,32 +999,64 @@ class JarvisHUD(QMainWindow):
             self.typing_timer.stop()
 
     def update_telemetry(self):
+        global LAST_NET_IO, LAST_NET_TIME
+        
+        # Clock & Date
+        now = datetime.datetime.now()
+        self.time_label.setText(now.strftime("%Y-%m-%d  %H:%M:%S"))
+
+        # CPU
         cpu = int(psutil.cpu_percent())
         self.bar_cpu.setValue(cpu)
-        self.bar_cpu.setFormat(f"{cpu}%")
+        self.lbl_cpu_text.setText(f"CPU Usage: {cpu}%")
 
+        # RAM
         ram = psutil.virtual_memory()
+        used_ram = round(ram.used / (1024**3), 2)
+        total_ram = round(ram.total / (1024**3), 2)
         self.bar_ram.setValue(int(ram.percent))
-        used_gb = round(ram.used / (1024**3), 1)
-        self.bar_ram.setFormat(f"{used_gb}G ({int(ram.percent)}%)")
+        self.lbl_ram_text.setText(f"RAM: {used_ram}G / {total_ram}G - {int(ram.percent)}%")
 
-        battery = psutil.sensors_battery()
-        if battery:
-            self.bar_bat.setValue(int(battery.percent))
-            self.bar_bat.setFormat(f"{battery.percent}%")
-        else:
-            self.bar_bat.setValue(100)
-            self.bar_bat.setFormat("AC PWR")
+        # Disk
+        try:
+            disk = psutil.disk_usage('/')
+            used_disk = round(disk.used / (1024**3), 1)
+            total_disk = round(disk.total / (1024**3), 1)
+            self.bar_disk.setValue(int(disk.percent))
+            self.lbl_disk_text.setText(f"Disk Usage: {used_disk}G / {total_disk}G")
+        except Exception:
+            pass
+
+        # Network Traffic Speed
+        cur_net = psutil.net_io_counters()
+        cur_time = time.time()
+        dt = max(1e-5, cur_time - LAST_NET_TIME)
+        
+        up_speed = round((cur_net.bytes_sent - LAST_NET_IO.bytes_sent) / 1024 / dt, 1)
+        down_speed = round((cur_net.bytes_recv - LAST_NET_IO.bytes_recv) / 1024 / dt, 1)
+        
+        LAST_NET_IO = cur_net
+        LAST_NET_TIME = cur_time
+        
+        self.lbl_net_up.setText(f"Network Up: {up_speed} KB/s")
+        self.lbl_net_down.setText(f"Network Down: {down_speed} KB/s")
+
+        # Uptime & Processes
+        uptime_sec = int(time.time() - START_TIME)
+        hrs, rem = divmod(uptime_sec, 3600)
+        mins, _ = divmod(rem, 60)
+        self.lbl_uptime.setText(f"Uptime: {hrs}h {mins}m")
+        self.lbl_processes.setText(f"Processes: {len(psutil.pids())}")
 
     def toggle_mute(self):
         self.worker.is_muted = not self.worker.is_muted
         if self.worker.is_muted:
-            self.btn_mute.setText("🔇 UNMUTE")
-            self.btn_mute.setStyleSheet("QPushButton { background: rgba(255, 85, 102, 0.25); border: 1px solid #ff5566; color: #ffffff; border-radius: 6px; font-size: 10px; font-weight: bold; padding: 5px 8px; }")
+            self.btn_mute.setText("🔇 UNMUTE INPUT")
+            self.btn_mute.setStyleSheet("QPushButton { background: rgba(255, 60, 90, 0.25); border: 1px solid #ff3c5a; color: #ffffff; border-radius: 6px; font-size: 10px; font-weight: bold; padding: 6px 10px; }")
             self.update_status("MUTED")
         else:
-            self.btn_mute.setText("🎙 MUTE")
-            self.btn_mute.setStyleSheet("QPushButton { background: rgba(0, 210, 255, 0.08); border: 1px solid rgba(0, 210, 255, 0.3); border-radius: 6px; color: #a0c4e2; font-size: 10px; font-weight: bold; padding: 5px 8px; }")
+            self.btn_mute.setText("🎙 MUTE INPUT")
+            self.btn_mute.setStyleSheet("QPushButton { background: rgba(0, 215, 255, 0.1); border: 1px solid rgba(0, 215, 255, 0.35); border-radius: 6px; color: #a0d4f2; font-size: 10px; font-weight: bold; padding: 6px 10px; }")
             self.update_status("STANDBY")
 
     def clear_transcript(self):
@@ -955,15 +1066,17 @@ class JarvisHUD(QMainWindow):
     def toggle_compact_mode(self):
         self.is_compact = not self.is_compact
         if self.is_compact:
+            self.left_panel.hide()
+            self.right_panel.hide()
             self.dialogue_frame.hide()
-            self.telemetry_widget.hide()
-            self.setFixedSize(300, 310)
+            self.setFixedSize(360, 420)
         else:
+            self.left_panel.show()
+            self.right_panel.show()
             self.dialogue_frame.show()
-            self.telemetry_widget.show()
-            self.setFixedSize(580, 560)
+            self.setFixedSize(920, 580)
 
-    # Holographic Border Targeting Reticle Corner Painter
+    # Holographic Corner Targeting Reticles
     def paintEvent(self, event):
         painter = QPainter(self)
         painter.setRenderHint(QPainter.RenderHint.Antialiasing)
@@ -973,23 +1086,23 @@ class JarvisHUD(QMainWindow):
 
         w = self.width()
         h = self.height()
-        corner_len = 16
+        c_len = 18
 
         # Top-Left Reticle
-        painter.drawLine(10, 10 + corner_len, 10, 10)
-        painter.drawLine(10, 10, 10 + corner_len, 10)
+        painter.drawLine(10, 10 + c_len, 10, 10)
+        painter.drawLine(10, 10, 10 + c_len, 10)
 
         # Top-Right Reticle
-        painter.drawLine(w - 10 - corner_len, 10, w - 10, 10)
-        painter.drawLine(w - 10, 10, w - 10, 10 + corner_len)
+        painter.drawLine(w - 10 - c_len, 10, w - 10, 10)
+        painter.drawLine(w - 10, 10, w - 10, 10 + c_len)
 
         # Bottom-Left Reticle
-        painter.drawLine(10, h - 10 - corner_len, 10, h - 10)
-        painter.drawLine(10, h - 10, 10 + corner_len, h - 10)
+        painter.drawLine(10, h - 10 - c_len, 10, h - 10)
+        painter.drawLine(10, h - 10, 10 + c_len, h - 10)
 
         # Bottom-Right Reticle
-        painter.drawLine(w - 10 - corner_len, h - 10, w - 10, h - 10)
-        painter.drawLine(w - 10, h - 10 - corner_len, w - 10, h - 10)
+        painter.drawLine(w - 10 - c_len, h - 10, w - 10, h - 10)
+        painter.drawLine(w - 10, h - 10 - c_len, w - 10, h - 10)
 
     # Draggable Window Logic
     def mousePressEvent(self, event):
