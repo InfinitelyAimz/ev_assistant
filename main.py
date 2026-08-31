@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import re
+import html
 import urllib.parse
 import platform
 import webbrowser
@@ -225,20 +226,31 @@ def listen(worker_ref=None, silence_limit=0.6, threshold=450):
         return ""
 
     audio_data = np.concatenate(audio_chunks, axis=0)
-    wavfile.write(temp_wav_path, sample_rate, audio_data)
+    
+    # Safe file write with retry handle for file-lock protection
+    for _ in range(3):
+        try:
+            wavfile.write(temp_wav_path, sample_rate, audio_data)
+            break
+        except Exception:
+            time.sleep(0.05)
             
-    segments, _ = stt_model.transcribe(
-        temp_wav_path, 
-        language="en", 
-        beam_size=1,
-        best_of=1,
-        vad_filter=True,
-        repetition_penalty=1.2,
-        condition_on_previous_text=False,
-        initial_prompt=WHISPER_PROMPT,
-        temperature=0.0
-    )
-    return "".join([segment.text for segment in segments]).strip()
+    try:
+        segments, _ = stt_model.transcribe(
+            temp_wav_path, 
+            language="en", 
+            beam_size=1,
+            best_of=1,
+            vad_filter=True,
+            repetition_penalty=1.2,
+            condition_on_previous_text=False,
+            initial_prompt=WHISPER_PROMPT,
+            temperature=0.0
+        )
+        return "".join([segment.text for segment in segments]).strip()
+    except Exception as e:
+        print(f"[Whisper Transcribe Error]: {e}")
+        return ""
 
 # -------------------------------------------------------------
 # 2. SYSTEM TOOLS & WORKSPACE UTILITIES
@@ -327,12 +339,6 @@ def play_youtube_music(query: str = ""):
                 pass
 
         encoded_query = urllib.parse.quote_plus(clean_q)
-        html = requests.get(f"https://www.youtube.com/results?search_query={encoded_query}", timeout=4).text
-        video_ids = re.findall(r"watch\?v=(\S{11})", html)
-        if video_ids:
-            webbrowser.open(f"https://music.youtube.com/watch?v={video_ids[0]}")
-            return f"Playing {clean_q} on YouTube Music now, Aimz."
-        
         webbrowser.open(f"https://music.youtube.com/search?q={encoded_query}")
         return f"Searching YouTube Music for {clean_q}, Aimz."
     except Exception as e:
@@ -346,12 +352,6 @@ def play_youtube_video(query: str = ""):
             return "Opening YouTube, Aimz."
 
         encoded_query = urllib.parse.quote_plus(clean_q)
-        html = requests.get(f"https://www.youtube.com/results?search_query={encoded_query}", timeout=4).text
-        video_ids = re.findall(r"watch\?v=(\S{11})", html)
-        if video_ids:
-            webbrowser.open(f"https://music.youtube.com/watch?v={video_ids[0]}")
-            return f"Playing video for {clean_q} on YouTube, Aimz."
-        
         webbrowser.open(f"https://www.youtube.com/results?search_query={encoded_query}")
         return f"Searching YouTube for {clean_q}, Aimz."
     except Exception as e:
@@ -383,7 +383,7 @@ def set_brightness(level: int = 100):
             sbc.set_brightness(clamped_level, display=0)
         return f"Brightness adjusted to {clamped_level}%, Aimz."
     except Exception as e:
-        return f"Brightness adjustment failed: {str(e)}"
+        return f"Brightness control unavailable or failed: {str(e)}"
 
 def media_control(action: str = "play_pause"):
     VK_MEDIA_NEXT_TRACK = 0xB0
@@ -427,10 +427,14 @@ def get_crypto_price(coin="bitcoin"):
             "ethereum": "ethereum",
             "sol": "solana",
             "solana": "solana",
-            "xrp": "ripple"
+            "xrp": "ripple",
+            "doge": "dogecoin",
+            "dogecoin": "dogecoin",
+            "ada": "cardano",
+            "cardano": "cardano"
         }
         coin_id = alias_map.get(coin_clean, coin_clean)
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={coin_id}&vs_currencies=usd"
+        url = f"https://api.coingecko.com/api/v3/simple/price?ids={urllib.parse.quote(coin_id)}&vs_currencies=usd"
         res = requests.get(url, timeout=3).json()
         if coin_id in res and "usd" in res[coin_id]:
             price = res[coin_id]["usd"]
@@ -529,6 +533,10 @@ def handle_direct_commands(text):
         return get_crypto_price("solana")
     if "ripple" in clean or "xrp" in clean:
         return get_crypto_price("ripple")
+    if "doge" in clean:
+        return get_crypto_price("dogecoin")
+    if "cardano" in clean or "ada" in clean:
+        return get_crypto_price("cardano")
 
     if any(k in clean for k in ["dollar to rand", "usd to zar", "dollar rand"]):
         return get_exchange_rate("USD", "ZAR")
@@ -580,7 +588,7 @@ class AssistantWorker(QThread):
         self.status_changed.emit("SPEAKING")
         init_greeting = "Cybernetic interface initialized. Systems nominal, Aimz."
         speak(init_greeting, self, force_speech=True)
-        # BUG FIX: After startup greeting, respect mute state instead of hardcoding STANDBY
+        
         if self.is_muted:
             self.status_changed.emit("MUTED")
         else:
@@ -604,16 +612,14 @@ class AssistantWorker(QThread):
 
         while self.is_running:
             try:
-                # 1. Process Queued Typed Text Input (Even when muted!)
+                # 1. Process Queued Typed Text Input FIRST (Works even when muted!)
                 if len(self.text_queue) > 0:
                     user_input = self.text_queue.popleft()
                 elif self.is_muted:
-                    # Hard lock: Stay in MUTED status and sleep until unmuted or text is typed
                     self.status_changed.emit("MUTED")
                     time.sleep(0.2)
                     continue
                 else:
-                    # 2. Fallback to Background Voice Listening
                     self.status_changed.emit("LISTENING")
                     user_input = listen(worker_ref=self, silence_limit=0.6, threshold=450)
 
@@ -650,7 +656,6 @@ class AssistantWorker(QThread):
                     messages.append({"role": "assistant", "content": fast_reply})
                     speak(fast_reply, self)
                     
-                    # BUG FIX: After query finishes, respect mute state instead of hardcoding STANDBY
                     if self.is_muted:
                         self.status_changed.emit("MUTED")
                     else:
@@ -679,7 +684,6 @@ class AssistantWorker(QThread):
                 messages.append({"role": "assistant", "content": reply})
                 speak(reply, self)
                 
-                # BUG FIX: After LLM finishes speaking, respect mute state instead of hardcoding STANDBY
                 if self.is_muted:
                     self.status_changed.emit("MUTED")
                 else:
@@ -1522,11 +1526,11 @@ class JarvisWidescreenHUD(QMainWindow):
         if self.worker.voice_silent_mode:
             self.btn_voice_mode.setText("[VOICE: OFF]")
             self.btn_voice_mode.setStyleSheet("QPushButton { color: #ffb833; background: rgba(255,184,51,0.12); border: 1px solid rgba(255,184,51,0.35); border-radius: 4px; padding: 2px 6px; } QPushButton:hover { background: rgba(255,184,51,0.28); }")
-            self.console_edit.append('<span style="color: #ffb833;">// Stealth Mode: Voice playback muted (text-only).</span>')
+            self.console_edit.append('<span style="color: #ffb833; font-family: \'Consolas\', monospace;">// Stealth Mode: Voice playback muted (text-only).</span>')
         else:
             self.btn_voice_mode.setText("[VOICE: ON]")
             self.btn_voice_mode.setStyleSheet("QPushButton { color: #00ffaa; background: rgba(0,255,170,0.12); border: 1px solid rgba(0,255,170,0.35); border-radius: 4px; padding: 2px 6px; } QPushButton:hover { background: rgba(0,255,170,0.28); }")
-            self.console_edit.append('<span style="color: #00ff8c;">// Standard Mode: Audio voice feedback active.</span>')
+            self.console_edit.append('<span style="color: #00ff8c; font-family: \'Consolas\', monospace;">// Standard Mode: Audio voice feedback active.</span>')
 
     def update_busy_ui(self, is_busy):
         if is_busy:
@@ -1542,7 +1546,7 @@ class JarvisWidescreenHUD(QMainWindow):
             return
             
         if self.worker.is_busy:
-            self.console_edit.append('<span style="color: #ff5566;">// System is currently processing another query. Please wait.</span>')
+            self.console_edit.append('<span style="color: #ff5566; font-family: \'Consolas\', monospace;">// System is currently processing another query. Please wait.</span>')
             return
 
         self.cmd_input.add_to_history(query)
@@ -1616,45 +1620,67 @@ class JarvisWidescreenHUD(QMainWindow):
         self.graph_uptime.set_theme_color(self.current_theme)
 
     def append_user_transcript(self, text):
-        self.console_edit.append(f'<span style="color: #60c5ba; font-weight: bold;">Aimz&gt;</span> {text}')
-        self.console_edit.verticalScrollBar().setValue(self.console_edit.verticalScrollBar().maximum())
+        safe_text = html.escape(text)
+        sb = self.console_edit.verticalScrollBar()
+        is_at_bottom = sb.value() >= sb.maximum() - 15
+
+        self.console_edit.append(f'<span style="color: #60c5ba; font-family: \'Consolas\', monospace; font-weight: bold;">Aimz&gt;</span> <span style="font-family: \'Consolas\', monospace;">{safe_text}</span>')
+        
+        if is_at_bottom:
+            sb.setValue(sb.maximum())
 
     # ---------------------------------------------------------
     # Synchronized Typewriter Stream Slots
     # ---------------------------------------------------------
     def handle_stream_start(self):
+        sb = self.console_edit.verticalScrollBar()
+        is_at_bottom = sb.value() >= sb.maximum() - 15
+
         cursor = self.console_edit.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self.console_edit.setTextCursor(cursor)
-        self.console_edit.insertHtml('<span style="color: #00f0ff; font-weight: bold;">E.V&gt;</span> ')
-        self.console_edit.verticalScrollBar().setValue(self.console_edit.verticalScrollBar().maximum())
+        self.console_edit.insertHtml('<span style="color: #00f0ff; font-family: \'Consolas\', monospace; font-weight: bold;">E.V&gt;</span> ')
+        
+        if is_at_bottom:
+            sb.setValue(sb.maximum())
 
     def handle_stream_word(self, word):
+        safe_word = html.escape(word)
+        sb = self.console_edit.verticalScrollBar()
+        is_at_bottom = sb.value() >= sb.maximum() - 15
+
         cursor = self.console_edit.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self.console_edit.setTextCursor(cursor)
-        self.console_edit.insertHtml(f'<span style="color: #00f0ff;">{word}</span>')
-        self.console_edit.verticalScrollBar().setValue(self.console_edit.verticalScrollBar().maximum())
+        self.console_edit.insertHtml(f'<span style="color: #00f0ff; font-family: \'Consolas\', monospace;">{safe_word}</span>')
+        
+        if is_at_bottom:
+            sb.setValue(sb.maximum())
 
     def handle_stream_end(self):
+        sb = self.console_edit.verticalScrollBar()
+        is_at_bottom = sb.value() >= sb.maximum() - 15
+
         cursor = self.console_edit.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self.console_edit.setTextCursor(cursor)
         self.console_edit.insertHtml('<br>')
-        self.console_edit.verticalScrollBar().setValue(self.console_edit.verticalScrollBar().maximum())
+        
+        if is_at_bottom:
+            sb.setValue(sb.maximum())
 
     def clear_transcript(self):
         self.console_edit.clear()
-        self.console_edit.append('<span style="color: #8899a6;">// Terminal feed cleared.</span>')
+        self.console_edit.append('<span style="color: #8899a6; font-family: \'Consolas\', monospace;">// Terminal feed cleared.</span>')
 
     def toggle_mute(self):
         self.worker.is_muted = not self.worker.is_muted
         if self.worker.is_muted:
             self.update_status("MUTED")
-            self.console_edit.append('<span style="color: #ff5566;">// Audio input stream MUTED.</span>')
+            self.console_edit.append('<span style="color: #ff5566; font-family: \'Consolas\', monospace;">// Audio input stream MUTED.</span>')
         else:
             self.update_status("STANDBY")
-            self.console_edit.append('<span style="color: #00ff8c;">// Audio input stream ACTIVE.</span>')
+            self.console_edit.append('<span style="color: #00ff8c; font-family: \'Consolas\', monospace;">// Audio input stream ACTIVE.</span>')
 
     def update_telemetry(self):
         global LAST_NET_IO, LAST_NET_TIME, NET_UP_SPEED, NET_DOWN_SPEED
