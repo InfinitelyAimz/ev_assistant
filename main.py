@@ -1639,7 +1639,8 @@ class JarvisWidescreenHUD(QMainWindow):
         cursor = self.console_edit.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self.console_edit.setTextCursor(cursor)
-        self.console_edit.insertHtml('<span style="color: #00f0ff; font-family: \'Consolas\', monospace; font-weight: bold;">E.V&gt;</span> ')
+        # Double break adds an entire clean line of space between your input and E.V.'s reply
+        self.console_edit.insertHtml('<br><br><span style="color: #00f0ff; font-family: \'Consolas\', monospace; font-weight: bold;">E.V&gt;</span> ')
         
         if is_at_bottom:
             sb.setValue(sb.maximum())
