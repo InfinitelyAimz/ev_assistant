@@ -92,7 +92,7 @@ def speak(text, worker_ref=None, force_speech=False):
             worker_ref.stream_start.emit()
             for w in words:
                 worker_ref.stream_word.emit(w + " ")
-                time.sleep(0.065)
+                time.sleep(0.045)
             worker_ref.stream_end.emit()
         return
 
@@ -120,7 +120,7 @@ def speak(text, worker_ref=None, force_speech=False):
                 # Start non-blocking playback
                 sd.play(audio_array, samplerate=sample_rate)
                 
-                # Pace word output precisely over the duration of the audio clip
+                # Pace word output precisely over the duration of the audio clip (slightly accelerated)
                 start_time = time.time()
                 emitted_words = 0
                 
@@ -134,7 +134,7 @@ def speak(text, worker_ref=None, force_speech=False):
                             worker_ref.stream_word.emit(words[emitted_words] + " ")
                         emitted_words += 1
                         
-                    time.sleep(0.015)
+                    time.sleep(0.008)
 
                 sd.wait() # Ensure audio is fully cleared from speakers
                 
@@ -155,12 +155,12 @@ def speak(text, worker_ref=None, force_speech=False):
             worker_ref.stream_start.emit()
             for w in words:
                 worker_ref.stream_word.emit(w + " ")
-                time.sleep(0.07)
+                time.sleep(0.045)
             worker_ref.stream_end.emit()
 
         import pyttsx3
         engine = pyttsx3.init('sapi5')
-        engine.setProperty('rate', 160)
+        engine.setProperty('rate', 170)
         engine.say(clean_text)
         engine.runAndWait()
         engine.stop()
@@ -1639,7 +1639,6 @@ class JarvisWidescreenHUD(QMainWindow):
         cursor = self.console_edit.textCursor()
         cursor.movePosition(QTextCursor.MoveOperation.End)
         self.console_edit.setTextCursor(cursor)
-        # Double break adds an entire clean line of space between your input and E.V.'s reply
         self.console_edit.insertHtml('<br><br><span style="color: #00f0ff; font-family: \'Consolas\', monospace; font-weight: bold;">E.V&gt;</span> ')
         
         if is_at_bottom:
