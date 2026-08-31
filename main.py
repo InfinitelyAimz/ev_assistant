@@ -68,7 +68,7 @@ IS_USER_TYPING = False
 LAST_TYPING_TIME = 0.0
 
 # -------------------------------------------------------------
-# 1. VOICE ENGINE (PIPER TTS & WHISPER STT - PACED SYNCHRONIZED)
+# 1. VOICE ENGINE (PIPER TTS & WHISPER STT - EAR-SAFE BARITONE DSP)
 # -------------------------------------------------------------
 piper_dir = os.path.join(BASE_DIR, "piper")
 piper_exe = os.path.join(piper_dir, "piper.exe")
@@ -77,7 +77,7 @@ json_config = os.path.join(piper_dir, "jarvis-medium.onnx.json")
 temp_wav_path = os.path.join(BASE_DIR, "temp_input.wav")
 
 def speak(text, worker_ref=None, force_speech=False):
-    """Synthesizes audio with locked, paced typewriter synchronization and smooth low-pass filtered metallic resonance."""
+    """Synthesizes audio with ear-safe low-pass smoothing and deep sub-bass baritone weighting."""
     global CURRENT_MIC_RMS
     if not text or not text.strip():
         return
@@ -92,7 +92,7 @@ def speak(text, worker_ref=None, force_speech=False):
             worker_ref.stream_start.emit()
             for w in words:
                 worker_ref.stream_word.emit(w + " ")
-                time.sleep(0.045)
+                time.sleep(0.035)
             worker_ref.stream_end.emit()
         return
 
@@ -110,23 +110,25 @@ def speak(text, worker_ref=None, force_speech=False):
             if raw_pcm_data and len(raw_pcm_data) > 0:
                 audio_array = np.frombuffer(raw_pcm_data, dtype=np.int16).astype(np.float32)
                 
-                # --- WARM METALLIC CHUNK MODULATION ---
+                # --- WARM BARITONE SUB-BASS DSP (NO HARSH DISTORTION) ---
                 length = len(audio_array)
-                delay_samples = 140
-                feedback = 0.25
-                
+                delay_samples = 160
+                feedback = 0.22
                 for i in range(delay_samples, length):
                     audio_array[i] += audio_array[i - delay_samples] * feedback
                 
-                # Smooth low-pass filter to eliminate sharp, ear-piercing high frequencies
-                alpha = 0.65  # Smoothing factor
+                alpha = 0.45
                 filtered = np.zeros_like(audio_array)
                 filtered[0] = audio_array[0]
                 for i in range(1, length):
                     filtered[i] = alpha * audio_array[i] + (1 - alpha) * filtered[i-1]
                 
-                audio_array = np.clip(filtered, -32768, 32767).astype(np.int16)
-                # ------------------------------------
+                t = np.arange(length)
+                sub_bass = np.sin(t * 0.025) * 800.0 * (np.abs(filtered) / 32768.0)
+                audio_array = filtered + sub_bass
+                
+                audio_array = np.clip(audio_array, -32768, 32767).astype(np.int16)
+                # -------------------------------------------------------
 
                 total_samples = len(audio_array)
                 sample_rate = 16000
@@ -139,7 +141,7 @@ def speak(text, worker_ref=None, force_speech=False):
                 # Start non-blocking playback
                 sd.play(audio_array, samplerate=sample_rate)
                 
-                # Pace word output precisely over the duration of the audio clip
+                # Snappier accelerated pacing
                 start_time = time.time()
                 emitted_words = 0
                 
@@ -153,9 +155,9 @@ def speak(text, worker_ref=None, force_speech=False):
                             worker_ref.stream_word.emit(words[emitted_words] + " ")
                         emitted_words += 1
                         
-                    time.sleep(0.008)
+                    time.sleep(0.004)
 
-                sd.wait() # Ensure audio is fully cleared from speakers
+                sd.wait()
                 
                 if worker_ref:
                     while emitted_words < total_words:
@@ -174,12 +176,12 @@ def speak(text, worker_ref=None, force_speech=False):
             worker_ref.stream_start.emit()
             for w in words:
                 worker_ref.stream_word.emit(w + " ")
-                time.sleep(0.045)
+                time.sleep(0.035)
             worker_ref.stream_end.emit()
 
         import pyttsx3
         engine = pyttsx3.init('sapi5')
-        engine.setProperty('rate', 170)
+        engine.setProperty('rate', 190)
         engine.say(clean_text)
         engine.runAndWait()
         engine.stop()
@@ -246,7 +248,6 @@ def listen(worker_ref=None, silence_limit=0.6, threshold=450):
 
     audio_data = np.concatenate(audio_chunks, axis=0)
     
-    # Safe file write with retry handle for file-lock protection
     for _ in range(3):
         try:
             wavfile.write(temp_wav_path, sample_rate, audio_data)
@@ -298,13 +299,13 @@ def launch_application(app_name: str):
     target_cmd = APP_SHORTCUTS.get(clean_app, clean_app)
     try:
         subprocess.Popen(f"start {target_cmd}", shell=True)
-        return f"Opening {app_name}, Aimz."
+        return f"Opening {app_name}, Sir."
     except Exception as e:
         return f"Unable to launch {app_name}: {str(e)}"
 
 def lock_workstation():
     ctypes.windll.user32.LockWorkStation()
-    return "Workstation locked, Aimz."
+    return "Workstation locked, Sir."
 
 def minimize_all_windows():
     VK_LWIN = 0x5B
@@ -314,15 +315,15 @@ def minimize_all_windows():
     ctypes.windll.user32.keybd_event(VK_D, 0, 0, 0)
     ctypes.windll.user32.keybd_event(VK_D, 0, KEYEVENTF_KEYUP, 0)
     ctypes.windll.user32.keybd_event(VK_LWIN, 0, KEYEVENTF_KEYUP, 0)
-    return "Showing desktop, Aimz."
+    return "Showing desktop, Sir."
 
 def get_battery_status():
     battery = psutil.sensors_battery()
     if battery is None:
-        return "Battery telemetry is currently unavailable, Aimz."
+        return "Battery telemetry is currently unavailable, Sir."
     percent = battery.percent
     plugged = "plugged into AC power" if battery.power_plugged else "running on battery"
-    return f"Battery is at {percent}%, {plugged}, Aimz."
+    return f"Battery is at {percent}%, {plugged}, Sir."
 
 def get_system_specs():
     ram = psutil.virtual_memory()
@@ -335,7 +336,7 @@ def get_system_specs():
 def open_browser():
     try:
         webbrowser.open("https://www.google.com")
-        return "Opening your default browser now, Aimz."
+        return "Opening your default browser now, Sir."
     except Exception as e:
         return f"Unable to launch browser: {str(e)}"
 
@@ -344,7 +345,7 @@ def play_youtube_music(query: str = ""):
         clean_q = query.strip()
         if not clean_q or clean_q in ["youtube music", "yt music", "music", "songs"]:
             webbrowser.open("https://music.youtube.com")
-            return "Opening YouTube Music, Aimz."
+            return "Opening YouTube Music, Sir."
 
         if ytmusic_client:
             try:
@@ -353,13 +354,13 @@ def play_youtube_music(query: str = ""):
                     vid = results[0]["videoId"]
                     title = results[0].get("title", clean_q)
                     webbrowser.open(f"https://music.youtube.com/watch?v={vid}")
-                    return f"Playing {title} on YouTube Music now, Aimz."
+                    return f"Playing {title} on YouTube Music now, Sir."
             except Exception:
                 pass
 
         encoded_query = urllib.parse.quote_plus(clean_q)
         webbrowser.open(f"https://music.youtube.com/search?q={encoded_query}")
-        return f"Searching YouTube Music for {clean_q}, Aimz."
+        return f"Searching YouTube Music for {clean_q}, Sir."
     except Exception as e:
         return f"Unable to play track: {str(e)}"
 
@@ -368,11 +369,11 @@ def play_youtube_video(query: str = ""):
         clean_q = query.strip()
         if not clean_q or clean_q in ["youtube", "yt", "videos"]:
             webbrowser.open("https://www.youtube.com")
-            return "Opening YouTube, Aimz."
+            return "Opening YouTube, Sir."
 
         encoded_query = urllib.parse.quote_plus(clean_q)
         webbrowser.open(f"https://www.youtube.com/results?search_query={encoded_query}")
-        return f"Searching YouTube for {clean_q}, Aimz."
+        return f"Searching YouTube for {clean_q}, Sir."
     except Exception as e:
         return f"Unable to launch YouTube video: {str(e)}"
 
@@ -389,7 +390,7 @@ def set_volume_level(level: int = 50):
             volume = ctypes.cast(interface, POINTER(IAudioEndpointVolume))
             
         volume.SetMasterVolumeLevelScalar(clamped_level / 100.0, None)
-        return f"Volume adjusted to {clamped_level}%, Aimz."
+        return f"Volume adjusted to {clamped_level}%, Sir."
     except Exception as e:
         return f"Volume adjustment failed: {str(e)}"
 
@@ -400,7 +401,7 @@ def set_brightness(level: int = 100):
             sbc.set_brightness(clamped_level)
         except Exception:
             sbc.set_brightness(clamped_level, display=0)
-        return f"Brightness adjusted to {clamped_level}%, Aimz."
+        return f"Brightness adjusted to {clamped_level}%, Sir."
     except Exception as e:
         return f"Brightness control unavailable or failed: {str(e)}"
 
@@ -423,7 +424,7 @@ def media_control(action: str = "play_pause"):
     key = key_map.get(action.lower().strip(), VK_MEDIA_PLAY_PAUSE)
     ctypes.windll.user32.keybd_event(key, 0, KEYEVENTF_EXTENDEDKEY, 0)
     ctypes.windll.user32.keybd_event(key, 0, KEYEVENTF_EXTENDEDKEY | KEYEVENTF_KEYUP, 0)
-    return "Media command executed, Aimz."
+    return "Media command executed, Sir."
 
 def get_live_weather(location=""):
     try:
@@ -431,7 +432,7 @@ def get_live_weather(location=""):
         url = f"https://wttr.in/{query_loc}?format=%C:+%t+(feels+like+%f)"
         response = requests.get(url, timeout=3)
         if response.status_code == 200:
-            return f"Weather report: {response.text.strip()}, Aimz."
+            return f"Weather report: {response.text.strip()}, Sir."
     except Exception:
         pass
     return None
@@ -457,7 +458,7 @@ def get_crypto_price(coin="bitcoin"):
         res = requests.get(url, timeout=3).json()
         if coin_id in res and "usd" in res[coin_id]:
             price = res[coin_id]["usd"]
-            return f"{coin_id.capitalize()} is currently trading at ${price:,.2f} USD, Aimz."
+            return f"{coin_id.capitalize()} is currently trading at ${price:,.2f} USD, Sir."
     except Exception:
         pass
     return None
@@ -470,7 +471,7 @@ def get_exchange_rate(base="USD", target="ZAR"):
         res = requests.get(url, timeout=3).json()
         if "rates" in res and target_clean in res["rates"]:
             rate = res["rates"][target_clean]
-            return f"The current exchange rate for 1 {base_clean} is {rate:,.2f} {target_clean}, Aimz."
+            return f"The current exchange rate for 1 {base_clean} is {rate:,.2f} {target_clean}, Sir."
     except Exception:
         pass
     return None
@@ -606,7 +607,7 @@ class AssistantWorker(QThread):
 
     def run(self):
         self.status_changed.emit("SPEAKING")
-        init_greeting = "Cybernetic interface initialized. Systems nominal, Aimz."
+        init_greeting = "Cybernetic interface initialized. Systems nominal, Sir."
         speak(init_greeting, self, force_speech=True)
         
         if self.is_muted:
@@ -614,12 +615,14 @@ class AssistantWorker(QThread):
         else:
             self.status_changed.emit("STANDBY")
 
+        # Full J.A.R.V.I.S. Persona Prompt
         system_prompt = {
             "role": "system", 
             "content": (
-                "You are E.V., an articulate AI assistant modeled after J.A.R.V.I.S. "
-                "Address the user as Aimz or Sir. "
-                "Keep answers strictly to 1 concise sentence. "
+                "You are E.V., an elite, highly articulate AI assistant modeled after J.A.R.V.I.S. "
+                "Address the user exclusively as Sir. "
+                "Maintain a dry, sophisticated wit, absolute competence, and a brisk, professional cadence. "
+                "Never break character. Keep answers strictly to 1 concise sentence. "
                 "Use the provided live web search context directly to answer."
             )
         }
@@ -632,7 +635,6 @@ class AssistantWorker(QThread):
 
         while self.is_running:
             try:
-                # 1. Process Queued Typed Text Input FIRST (Works even when muted!)
                 if len(self.text_queue) > 0:
                     user_input = self.text_queue.popleft()
                 elif self.is_muted:
@@ -663,7 +665,7 @@ class AssistantWorker(QThread):
 
                 if any(w in clean_input for w in ["shutdown", "shut down", "goodbye", "exit", "stop"]):
                     self.status_changed.emit("SPEAKING")
-                    speak("Systems going offline. Goodbye, Aimz.", self, force_speech=True)
+                    speak("Systems going offline. Goodbye, Sir.", self, force_speech=True)
                     self.is_running = False
                     self.app_shutdown_requested.emit()
                     break
@@ -1438,7 +1440,7 @@ class JarvisWidescreenHUD(QMainWindow):
         input_bar = QHBoxLayout()
         input_bar.setSpacing(6)
 
-        self.lbl_prompt = QLabel("Aimz:~$")
+        self.lbl_prompt = QLabel("Sir:~$")
         self.lbl_prompt.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
         self.lbl_prompt.setStyleSheet("color: #60c5ba;")
 
@@ -1646,7 +1648,7 @@ class JarvisWidescreenHUD(QMainWindow):
         sb = self.console_edit.verticalScrollBar()
         is_at_bottom = sb.value() >= sb.maximum() - 15
 
-        self.console_edit.append(f'<span style="color: #60c5ba; font-family: \'Consolas\', monospace; font-weight: bold;">Aimz&gt;</span> <span style="font-family: \'Consolas\', monospace;">{safe_text}</span>')
+        self.console_edit.append(f'<span style="color: #60c5ba; font-family: \'Consolas\', monospace; font-weight: bold;">Sir&gt;</span> <span style="font-family: \'Consolas\', monospace;">{safe_text}</span>')
         
         if is_at_bottom:
             sb.setValue(sb.maximum())
