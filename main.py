@@ -193,7 +193,6 @@ def listen(worker_ref=None, silence_limit=0.6, threshold=450):
     
     with sd.InputStream(samplerate=sample_rate, channels=1, dtype='int16') as stream:
         while True:
-            # Instant kill-switch: if muted mid-listen, abort immediately
             if worker_ref and worker_ref.is_muted:
                 CURRENT_MIC_RMS = 0.0
                 return ""
@@ -581,7 +580,11 @@ class AssistantWorker(QThread):
         self.status_changed.emit("SPEAKING")
         init_greeting = "Cybernetic interface initialized. Systems nominal, Aimz."
         speak(init_greeting, self, force_speech=True)
-        self.status_changed.emit("STANDBY")
+        # BUG FIX: After startup greeting, respect mute state instead of hardcoding STANDBY
+        if self.is_muted:
+            self.status_changed.emit("MUTED")
+        else:
+            self.status_changed.emit("STANDBY")
 
         system_prompt = {
             "role": "system", 
@@ -601,17 +604,24 @@ class AssistantWorker(QThread):
 
         while self.is_running:
             try:
+                # 1. Process Queued Typed Text Input (Even when muted!)
                 if len(self.text_queue) > 0:
                     user_input = self.text_queue.popleft()
-                elif not self.is_muted:
-                    self.status_changed.emit("LISTENING")
-                    user_input = listen(silence_limit=0.6, threshold=450)
-                else:
-                    time.sleep(0.1)
+                elif self.is_muted:
+                    # Hard lock: Stay in MUTED status and sleep until unmuted or text is typed
+                    self.status_changed.emit("MUTED")
+                    time.sleep(0.2)
                     continue
+                else:
+                    # 2. Fallback to Background Voice Listening
+                    self.status_changed.emit("LISTENING")
+                    user_input = listen(worker_ref=self, silence_limit=0.6, threshold=450)
 
                 if not user_input or len(user_input.strip()) < 2:
-                    self.status_changed.emit("STANDBY")
+                    if self.is_muted:
+                        self.status_changed.emit("MUTED")
+                    else:
+                        self.status_changed.emit("STANDBY")
                     continue
 
                 self.is_busy = True
@@ -639,7 +649,13 @@ class AssistantWorker(QThread):
                     messages.append({"role": "user", "content": user_input})
                     messages.append({"role": "assistant", "content": fast_reply})
                     speak(fast_reply, self)
-                    self.status_changed.emit("STANDBY")
+                    
+                    # BUG FIX: After query finishes, respect mute state instead of hardcoding STANDBY
+                    if self.is_muted:
+                        self.status_changed.emit("MUTED")
+                    else:
+                        self.status_changed.emit("STANDBY")
+                        
                     self.is_busy = False
                     self.busy_state_changed.emit(False)
                     continue
@@ -662,13 +678,22 @@ class AssistantWorker(QThread):
                 self.status_changed.emit("SPEAKING")
                 messages.append({"role": "assistant", "content": reply})
                 speak(reply, self)
-                self.status_changed.emit("STANDBY")
+                
+                # BUG FIX: After LLM finishes speaking, respect mute state instead of hardcoding STANDBY
+                if self.is_muted:
+                    self.status_changed.emit("MUTED")
+                else:
+                    self.status_changed.emit("STANDBY")
+                    
                 self.is_busy = False
                 self.busy_state_changed.emit(False)
 
             except Exception as e:
                 print(f"[Loop Exception]: {e}")
-                self.status_changed.emit("STANDBY")
+                if self.is_muted:
+                    self.status_changed.emit("MUTED")
+                else:
+                    self.status_changed.emit("STANDBY")
                 self.is_busy = False
                 self.busy_state_changed.emit(False)
 
