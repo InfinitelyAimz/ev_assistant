@@ -181,7 +181,7 @@ WHISPER_PROMPT = (
     "YouTube Music, play, pause, open, VS Code, Spotify, Discord, Explorer, Task Manager."
 )
 
-def listen(silence_limit=0.6, threshold=450):
+def listen(worker_ref=None, silence_limit=0.6, threshold=450):
     global CURRENT_MIC_RMS, IS_USER_TYPING, LAST_TYPING_TIME
     sample_rate = 16000
     chunk_size = 1024
@@ -193,6 +193,11 @@ def listen(silence_limit=0.6, threshold=450):
     
     with sd.InputStream(samplerate=sample_rate, channels=1, dtype='int16') as stream:
         while True:
+            # Instant kill-switch: if muted mid-listen, abort immediately
+            if worker_ref and worker_ref.is_muted:
+                CURRENT_MIC_RMS = 0.0
+                return ""
+
             if IS_USER_TYPING or (time.time() - LAST_TYPING_TIME < 1.2):
                 sd.sleep(50)
                 CURRENT_MIC_RMS = 0.0
