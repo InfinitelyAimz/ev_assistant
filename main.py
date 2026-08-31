@@ -77,7 +77,7 @@ json_config = os.path.join(piper_dir, "jarvis-medium.onnx.json")
 temp_wav_path = os.path.join(BASE_DIR, "temp_input.wav")
 
 def speak(text, worker_ref=None, force_speech=False):
-    """Synthesizes audio with locked, paced typewriter synchronization."""
+    """Synthesizes audio with locked, paced typewriter synchronization and smooth low-pass filtered metallic resonance."""
     global CURRENT_MIC_RMS
     if not text or not text.strip():
         return
@@ -108,7 +108,26 @@ def speak(text, worker_ref=None, force_speech=False):
             raw_pcm_data, _ = process.communicate(input=clean_text.encode('utf-8'))
 
             if raw_pcm_data and len(raw_pcm_data) > 0:
-                audio_array = np.frombuffer(raw_pcm_data, dtype=np.int16)
+                audio_array = np.frombuffer(raw_pcm_data, dtype=np.int16).astype(np.float32)
+                
+                # --- WARM METALLIC CHUNK MODULATION ---
+                length = len(audio_array)
+                delay_samples = 140
+                feedback = 0.25
+                
+                for i in range(delay_samples, length):
+                    audio_array[i] += audio_array[i - delay_samples] * feedback
+                
+                # Smooth low-pass filter to eliminate sharp, ear-piercing high frequencies
+                alpha = 0.65  # Smoothing factor
+                filtered = np.zeros_like(audio_array)
+                filtered[0] = audio_array[0]
+                for i in range(1, length):
+                    filtered[i] = alpha * audio_array[i] + (1 - alpha) * filtered[i-1]
+                
+                audio_array = np.clip(filtered, -32768, 32767).astype(np.int16)
+                # ------------------------------------
+
                 total_samples = len(audio_array)
                 sample_rate = 16000
                 total_words = len(words)
@@ -120,7 +139,7 @@ def speak(text, worker_ref=None, force_speech=False):
                 # Start non-blocking playback
                 sd.play(audio_array, samplerate=sample_rate)
                 
-                # Pace word output precisely over the duration of the audio clip (slightly accelerated)
+                # Pace word output precisely over the duration of the audio clip
                 start_time = time.time()
                 emitted_words = 0
                 
@@ -564,6 +583,7 @@ def handle_direct_commands(text):
 class AssistantWorker(QThread):
     status_changed = pyqtSignal(str)
     user_speech_detected = pyqtSignal(str)
+    app_shutdown_requested = pyqtSignal()
     
     # Live Word-by-Word Stream Signals
     stream_start = pyqtSignal()
@@ -645,6 +665,7 @@ class AssistantWorker(QThread):
                     self.status_changed.emit("SPEAKING")
                     speak("Systems going offline. Goodbye, Aimz.", self, force_speech=True)
                     self.is_running = False
+                    self.app_shutdown_requested.emit()
                     break
 
                 self.status_changed.emit("PROCESSING")
@@ -1279,6 +1300,7 @@ class JarvisWidescreenHUD(QMainWindow):
 
         self.worker.toggle_mute_requested.connect(self.toggle_mute)
         self.worker.busy_state_changed.connect(self.update_busy_ui)
+        self.worker.app_shutdown_requested.connect(self.close_application)
         self.worker.start()
 
         # Typing Watcher Timer (resets typing flag after idle)
