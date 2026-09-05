@@ -399,6 +399,20 @@ def set_volume_level(level: int = 50):
     except Exception as e:
         return f"Volume adjustment failed: {str(e)}"
 
+def get_current_volume_scalar():
+    try:
+        devices = AudioUtilities.GetSpeakers()
+        if hasattr(devices, 'EndpointVolume'):
+            volume = devices.EndpointVolume
+        else:
+            from comtypes import CLSCTX_ALL, POINTER
+            from pycaw.pycaw import IAudioEndpointVolume
+            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+            volume = ctypes.cast(interface, POINTER(IAudioEndpointVolume))
+        return int(volume.GetMasterVolumeLevelScalar() * 100)
+    except Exception:
+        return 50
+
 def set_brightness(level: int = 100):
     try:
         clamped_level = max(0, min(100, int(level)))
@@ -505,145 +519,76 @@ def web_search(query: str):
         return f"Web search encountered an issue: {str(e)}"
     return "No relevant web search results found."
 
-# ---------------------------------------------
-# OLLAMA TOOL SCHEMAS & EXECUTION (ITEM 3)
-# ---------------------------------------------
-OLLAMA_TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "set_volume_level",
-            "description": "Adjust the system master volume level (0 to 100).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "level": {"type": "integer", "description": "Volume percentage from 0 to 100."}
-                },
-                "required": ["level"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "set_brightness",
-            "description": "Adjust the display screen brightness level (0 to 100).",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "level": {"type": "integer", "description": "Brightness percentage from 0 to 100."}
-                },
-                "required": ["level"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "launch_application",
-            "description": "Launch a local desktop application like vscode, spotify, discord, notepad, or calculator.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "app_name": {"type": "string", "description": "Name of the application to launch."}
-                },
-                "required": ["app_name"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "play_youtube_video",
-            "description": "Search and play a video on YouTube.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Search term or video topic."}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "play_youtube_music",
-            "description": "Search and play a song on YouTube Music.",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Song title or artist."}
-                },
-                "required": ["query"]
-            }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "lock_workstation",
-            "description": "Lock the Windows workstation screen.",
-            "parameters": {"type": "object", "properties": {}}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "minimize_all_windows",
-            "description": "Minimize all windows to show the desktop.",
-            "parameters": {"type": "object", "properties": {}}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_battery_status",
-            "description": "Get current battery percentage and power status.",
-            "parameters": {"type": "object", "properties": {}}
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "get_system_specs",
-            "description": "Get current CPU load and RAM usage statistics.",
-            "parameters": {"type": "object", "properties": {}}
-        }
-    }
-]
-
-def execute_tool_call(tool_name, arguments):
-    """Executes the mapped Python function when requested by Ollama."""
-    try:
-        if tool_name == "set_volume_level":
-            return set_volume_level(arguments.get("level", 50))
-        elif tool_name == "set_brightness":
-            return set_brightness(arguments.get("level", 100))
-        elif tool_name == "launch_application":
-            return launch_application(arguments.get("app_name", ""))
-        elif tool_name == "play_youtube_video":
-            return play_youtube_video(arguments.get("query", ""))
-        elif tool_name == "play_youtube_music":
-            return play_youtube_music(arguments.get("query", ""))
-        elif tool_name == "lock_workstation":
-            return lock_workstation()
-        elif tool_name == "minimize_all_windows":
-            return minimize_all_windows()
-        elif tool_name == "get_battery_status":
-            return get_battery_status()
-        elif tool_name == "get_system_specs":
-            return get_system_specs()
-    except Exception as e:
-        return f"Tool execution encountered an error: {str(e)}"
-    return "Action completed successfully, Sir."
-
+# -------------------------------------------------------------
+# HYBRID FAST COMMAND ROUTER
+# -------------------------------------------------------------
 def handle_direct_commands(text):
-    """Fallback legacy command router for instant execution."""
     clean = text.lower()
+    
     file_triggers = ["search for file", "find file", "locate file", "file search"]
     if any(clean.startswith(prefix) for prefix in file_triggers):
         return handle_file_search_command(clean)
+
+    if "volume" in clean or "sound" in clean or "loud" in clean or "softer" in clean or "quiet" in clean:
+        current_vol = get_current_volume_scalar()
+        if "max" in clean or "full" in clean:
+            return set_volume_level(100)
+        if "mute" in clean or "silence" in clean:
+            return set_volume_level(0)
+        
+        nums = re.findall(r'\b\d+\b', clean)
+        if nums:
+            return set_volume_level(int(nums[0]))
+            
+        if any(w in clean for w in ["softer", "quieter", "drop", "lower", "down", "less"]):
+            new_vol = max(0, current_vol - 15)
+            return set_volume_level(new_vol)
+        if any(w in clean for w in ["louder", "raise", "increase", "up", "more"]):
+            new_vol = min(100, current_vol + 15)
+            return set_volume_level(new_vol)
+
+    if "brightness" in clean or "dim" in clean:
+        nums = re.findall(r'\b\d+\b', clean)
+        if nums:
+            return set_brightness(int(nums[0]))
+        if "max" in clean or "full" in clean:
+            return set_brightness(100)
+        if "dim" in clean or "lower" in clean:
+            return set_brightness(30)
+
+    if any(k in clean for k in ["lock pc", "lock workstation", "lock computer", "lock screen"]):
+        return lock_workstation()
+        
+    if any(k in clean for k in ["show desktop", "minimize all", "minimize windows", "clear screen"]):
+        return minimize_all_windows()
+
+    if any(k in clean for k in ["pause", "resume", "unpause"]):
+        return media_control("play_pause")
+    if any(w in clean for w in ["next track", "next song", "skip track", "skip song"]):
+        return media_control("next")
+    if any(w in clean for w in ["previous track", "previous song", "back song"]):
+        return media_control("previous")
+
+    if any(k in clean for k in ["youtube music", "yt music"]) or (clean.startswith("play") and any(w in clean for w in ["song", "track", "music"])):
+        return play_youtube_music(text)
+
+    if "youtube" in clean or "yt" in clean or clean.startswith("play video") or clean.startswith("search youtube"):
+        return play_youtube_video(text)
+
+    if "battery" in clean or "power" in clean or "charge" in clean:
+        return get_battery_status()
+        
+    if "spec" in clean or "ram" in clean or "cpu" in clean or "system" in clean:
+        return get_system_specs()
+        
+    if "browser" in clean or "chrome" in clean or "google" in clean or "open internet" in clean:
+        return open_browser()
+
+    if any(clean.startswith(prefix) for prefix in ["open ", "launch ", "start "]):
+        app_target = re.sub(r'^(open|launch|start)\s+(app|application)?\s*', '', clean).strip()
+        if app_target:
+            return launch_application(app_target)
+
     return None
 
 # -------------------------------------------------------------
@@ -728,7 +673,7 @@ class AssistantWorker(QThread):
 
                 self.status_changed.emit("PROCESSING")
                 
-                # Check legacy fast commands (like local files)
+                # Instant hybrid command check
                 fast_reply = handle_direct_commands(user_input)
                 if fast_reply:
                     self.status_changed.emit("SPEAKING")
@@ -764,7 +709,6 @@ class AssistantWorker(QThread):
                 weather_info = get_live_weather()
                 cpu_load = psutil.cpu_percent()
 
-                # Dynamic Persona Cadence Switch (Item 4)
                 if cpu_load > 65 or IS_USER_TYPING:
                     cadence_modifier = "SYSTEM STATE: Active coding/load detected. Adopt an ultra-concise, tactical telemetry cadence. Cut out all fluff."
                 else:
@@ -787,38 +731,10 @@ class AssistantWorker(QThread):
                     search_context = f"\n\nLIVE SEARCH RESULTS:\n{search_results}"
 
                 user_message_content = user_input + search_context
-                
-                # Re-inject system prompt and maintain history window
                 current_messages = [system_prompt] + messages[-4:] + [{"role": "user", "content": user_message_content}]
 
-                # Ollama Chat with Native Tool Calling (Item 3)
-                response = ollama.chat(
-                    model='llama3.2:3b', 
-                    messages=current_messages,
-                    tools=OLLAMA_TOOLS
-                )
-
-                # Handle Tool Execution if Ollama calls a function
-                if response.message.get('tool_calls'):
-                    for tool in response.message['tool_calls']:
-                        func_name = tool['function']['name']
-                        func_args = tool['function']['arguments']
-                        print(f"[Tool Execution]: Invoking {func_name} with {func_args}")
-                        
-                        tool_result = execute_tool_call(func_name, func_args)
-                        
-                        # Feed the tool output back into the conversation for the final LLM reply
-                        current_messages.append(response.message)
-                        current_messages.append({
-                            "role": "tool",
-                            "content": tool_result
-                        })
-
-                    # Get final response after tool execution
-                    final_response = ollama.chat(model='llama3.2:3b', messages=current_messages)
-                    reply = final_response.message.content
-                else:
-                    reply = response.message.content
+                response = ollama.chat(model='llama3.2:3b', messages=current_messages)
+                reply = response.message.content
 
                 if not reply or not reply.strip():
                     reply = "Task executed successfully, Sir."
