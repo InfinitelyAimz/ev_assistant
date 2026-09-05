@@ -63,9 +63,10 @@ NET_DOWN_SPEED = 0.0
 
 IS_USER_TYPING = False
 LAST_TYPING_TIME = 0.0
+CURRENT_DSP_PROFILE = "ultron"  # Options: "ultron", "jarvis_clean"
 
 # -------------------------------------------------------------
-# 1. VOICE ENGINE (LIGHTNING-FAST OFFLINE PIPER + ULTRON DSP)
+# 1. VOICE ENGINE (LIGHTNING-FAST OFFLINE PIPER + SELECTABLE DSP)
 # -------------------------------------------------------------
 piper_dir = os.path.join(BASE_DIR, "piper")
 piper_exe = os.path.join(piper_dir, "piper.exe")
@@ -74,14 +75,14 @@ json_config = os.path.join(piper_dir, "jarvis-medium.onnx.json")
 temp_wav_path = os.path.join(BASE_DIR, "temp_input.wav")
 
 def speak(text, worker_ref=None, force_speech=False):
-    """Synthesizes speech using local Piper engine with optimized dual-stage Ultron baritone DSP filtering."""
-    global CURRENT_MIC_RMS
+    """Synthesizes speech using local Piper engine with selectable DSP audio profiles."""
+    global CURRENT_MIC_RMS, CURRENT_DSP_PROFILE
     if not text or not text.strip():
         return
 
     clean_text = text.strip()
     words = clean_text.split()
-    print(f"\n[E.V. (Ultron)]: {clean_text}")
+    print(f"\n[E.V. ({CURRENT_DSP_PROFILE.upper()})]: {clean_text}")
 
     is_silent = worker_ref and worker_ref.voice_silent_mode and not force_speech
     if is_silent:
@@ -93,7 +94,7 @@ def speak(text, worker_ref=None, force_speech=False):
             worker_ref.stream_end.emit()
         return
 
-    # Local Piper Generation with Enhanced Dual-Tap Ultron DSP Transformation
+    # Local Piper Generation with Selectable DSP Profile
     if os.path.exists(piper_exe) and os.path.exists(voice_model):
         try:
             process = subprocess.Popen(
@@ -108,29 +109,39 @@ def speak(text, worker_ref=None, force_speech=False):
             if raw_pcm_data and len(raw_pcm_data) > 0:
                 audio_array = np.frombuffer(raw_pcm_data, dtype=np.int16).astype(np.float32)
                 
-                # --- OPTIMIZED ULTRON BARITONE & METALLIC DSP ---
-                length = len(audio_array)
-                delay_samples = 220
-                feedback = 0.32
-                
-                for i in range(delay_samples, length):
-                    audio_array[i] += audio_array[i - delay_samples] * feedback
-                    if i > int(delay_samples * 1.5):
-                        audio_array[i] += audio_array[i - int(delay_samples * 1.5)] * (feedback * 0.5)
-                
-                alpha = 0.35
-                filtered = np.zeros_like(audio_array)
-                filtered[0] = audio_array[0]
-                for i in range(1, length):
-                    filtered[i] = alpha * audio_array[i] + (1 - alpha) * filtered[i-1]
-                
-                t = np.arange(length)
-                sub_bass = np.sin(t * 0.015) * 1100.0 * (np.abs(filtered) / 32768.0)
-                metallic_ring = np.sin(t * 0.4) * 150.0 * (filtered / 32768.0)
-                audio_array = filtered + sub_bass + metallic_ring
+                # --- SELECTABLE AUDIO PROFILES ---
+                if CURRENT_DSP_PROFILE == "ultron":
+                    # Heavy Baritone & Metallic DSP
+                    length = len(audio_array)
+                    delay_samples = 220
+                    feedback = 0.32
+                    
+                    for i in range(delay_samples, length):
+                        audio_array[i] += audio_array[i - delay_samples] * feedback
+                        if i > int(delay_samples * 1.5):
+                            audio_array[i] += audio_array[i - int(delay_samples * 1.5)] * (feedback * 0.5)
+                    
+                    alpha = 0.35
+                    filtered = np.zeros_like(audio_array)
+                    filtered[0] = audio_array[0]
+                    for i in range(1, length):
+                        filtered[i] = alpha * audio_array[i] + (1 - alpha) * filtered[i-1]
+                    
+                    t = np.arange(length)
+                    sub_bass = np.sin(t * 0.015) * 1100.0 * (np.abs(filtered) / 32768.0)
+                    metallic_ring = np.sin(t * 0.4) * 150.0 * (filtered / 32768.0)
+                    audio_array = filtered + sub_bass + metallic_ring
+                else:
+                    # Clean J.A.R.V.I.S. Profile (Crisp broadcast tone)
+                    alpha = 0.85
+                    filtered = np.zeros_like(audio_array)
+                    filtered[0] = audio_array[0]
+                    for i in range(1, len(audio_array)):
+                        filtered[i] = alpha * audio_array[i] + (1 - alpha) * filtered[i-1]
+                    audio_array = filtered
+                # ---------------------------------------------
                 
                 audio_array = np.clip(audio_array, -32768, 32767).astype(np.int16)
-                # ---------------------------------------------
 
                 total_samples = len(audio_array)
                 sample_rate = 16000
@@ -199,7 +210,8 @@ WHISPER_PROMPT = (
     "system specs, RAM, CPU, weather, search, look up, price, Bitcoin, Ethereum, "
     "Solana, dollar, rand, euro, pound, exchange rate, richest, net worth, YouTube, "
     "YouTube Music, play, pause, open, VS Code, Spotify, Discord, Explorer, Task Manager, "
-    "ip address, network address, restart system, shut down system"
+    "ip address, network address, restart system, shut down system, "
+    "switch to jarvis, switch to ultron, jarvis profile, ultron profile"
 )
 
 def listen(worker_ref=None, silence_limit=0.6, threshold=450):
@@ -485,6 +497,17 @@ def get_local_ip():
     except Exception:
         return "Unable to retrieve local IP telemetry, Sir."
 
+def set_dsp_profile(profile_name: str):
+    global CURRENT_DSP_PROFILE
+    clean = profile_name.lower().strip()
+    if "jarvis" in clean or "clean" in clean:
+        CURRENT_DSP_PROFILE = "jarvis_clean"
+        return "Audio profile switched to Clean J.A.R.V.I.S., Sir."
+    elif "ultron" in clean or "baritone" in clean or "heavy" in clean:
+        CURRENT_DSP_PROFILE = "ultron"
+        return "Audio profile switched to Heavy Ultron Baritone, Sir."
+    return None
+
 def web_search(query: str):
     try:
         with DDGS() as ddgs:
@@ -588,6 +611,11 @@ def handle_direct_commands(text):
     if "shut down system" in clean or "power off computer" in clean:
         os.system("shutdown /s /t 5")
         return "Initiating system shutdown sequence, Sir."
+
+    if "switch to jarvis" in clean or "jarvis profile" in clean:
+        return set_dsp_profile("jarvis")
+    if "switch to ultron" in clean or "ultron profile" in clean:
+        return set_dsp_profile("ultron")
 
     if "weather" in clean:
         match = re.search(r'weather\s+(?:in|for)?\s*([a-zA-Z\s]+)', clean)
@@ -1386,6 +1414,12 @@ class JarvisWidescreenHUD(QMainWindow):
         self.btn_voice_mode.setStyleSheet("QPushButton { color: #00ffaa; background: rgba(0,255,170,0.12); border: 1px solid rgba(0,255,170,0.35); border-radius: 4px; padding: 2px 6px; } QPushButton:hover { background: rgba(0,255,170,0.28); }")
         self.btn_voice_mode.clicked.connect(self.toggle_voice_mode)
 
+        self.btn_dsp_mode = QPushButton("[DSP: ULTRON]")
+        self.btn_dsp_mode.setToolTip("Toggle Audio DSP Profile (Ultron Baritone vs Clean J.A.R.V.I.S.)")
+        self.btn_dsp_mode.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
+        self.btn_dsp_mode.setStyleSheet("QPushButton { color: #00d2ff; background: rgba(0,210,255,0.12); border: 1px solid rgba(0,210,255,0.35); border-radius: 4px; padding: 2px 6px; } QPushButton:hover { background: rgba(0,210,255,0.28); }")
+        self.btn_dsp_mode.clicked.connect(self.toggle_dsp_profile_ui)
+
         self.time_label = QLabel()
         self.time_label.setFont(QFont("Consolas", 9, QFont.Weight.Bold))
         self.time_label.setStyleSheet("color: #d0d8e0;")
@@ -1407,6 +1441,8 @@ class JarvisWidescreenHUD(QMainWindow):
         top_bar.addWidget(self.badge_status)
         top_bar.addSpacing(6)
         top_bar.addWidget(self.btn_voice_mode)
+        top_bar.addSpacing(6)
+        top_bar.addWidget(self.btn_dsp_mode)
         top_bar.addStretch()
         top_bar.addWidget(self.time_label)
         top_bar.addSpacing(10)
@@ -1553,6 +1589,19 @@ class JarvisWidescreenHUD(QMainWindow):
             self.btn_voice_mode.setText("[VOICE: ON]")
             self.btn_voice_mode.setStyleSheet("QPushButton { color: #00ffaa; background: rgba(0,255,170,0.12); border: 1px solid rgba(0,255,170,0.35); border-radius: 4px; padding: 2px 6px; } QPushButton:hover { background: rgba(0,255,170,0.28); }")
             self.console_edit.append('<span style="color: #00ff8c; font-family: \'Consolas\', monospace;">// Standard Mode: Audio voice feedback active.</span>')
+
+    def toggle_dsp_profile_ui(self):
+        global CURRENT_DSP_PROFILE
+        if CURRENT_DSP_PROFILE == "ultron":
+            CURRENT_DSP_PROFILE = "jarvis_clean"
+            self.btn_dsp_mode.setText("[DSP: JARVIS]")
+            self.btn_dsp_mode.setStyleSheet("QPushButton { color: #00ffaa; background: rgba(0,255,170,0.12); border: 1px solid rgba(0,255,170,0.35); border-radius: 4px; padding: 2px 6px; } QPushButton:hover { background: rgba(0,255,170,0.28); }")
+            self.console_edit.append('<span style="color: #00ffaa; font-family: \'Consolas\', monospace;">// Audio DSP Profile: Clean J.A.R.V.I.S. active.</span>')
+        else:
+            CURRENT_DSP_PROFILE = "ultron"
+            self.btn_dsp_mode.setText("[DSP: ULTRON]")
+            self.btn_dsp_mode.setStyleSheet("QPushButton { color: #00d2ff; background: rgba(0,210,255,0.12); border: 1px solid rgba(0,210,255,0.35); border-radius: 4px; padding: 2px 6px; } QPushButton:hover { background: rgba(0,210,255,0.28); }")
+            self.console_edit.append('<span style="color: #00d2ff; font-family: \'Consolas\', monospace;">// Audio DSP Profile: Heavy Ultron Baritone active.</span>')
 
     def update_busy_ui(self, is_busy):
         if is_busy:
