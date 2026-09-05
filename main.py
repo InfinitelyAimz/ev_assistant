@@ -193,7 +193,7 @@ WHISPER_PROMPT = (
     "Solana, dollar, rand, euro, pound, exchange rate, richest, net worth, YouTube, "
     "YouTube Music, play, pause, open, VS Code, Spotify, Discord, Explorer, Task Manager, "
     "ip address, network address, restart system, shut down system, search for file, "
-    "find file, locate file, file search"
+    "find file, locate file, file search, chat reset"
 )
 
 def listen(worker_ref=None, silence_limit=0.6, threshold=450):
@@ -520,11 +520,50 @@ def web_search(query: str):
     return "No relevant web search results found."
 
 # -------------------------------------------------------------
+# PERSISTENT CHAT MEMORY MANAGER
+# -------------------------------------------------------------
+MEMORY_FILE = os.path.join(BASE_DIR, "chat_memory.json")
+
+def load_chat_history(max_turns=5) -> list:
+    """Loads recent conversational history from local storage."""
+    if not os.path.exists(MEMORY_FILE):
+        return []
+    try:
+        with open(MEMORY_FILE, "r", encoding="utf-8") as f:
+            history = json.load(f)
+            return history[- (max_turns * 2):]
+    except Exception as e:
+        print(f"[Memory Load Error]: {e}")
+        return []
+
+def save_chat_turn(role: str, content: str):
+    """Appends and saves a conversational turn to local storage."""
+    history = load_chat_history(max_turns=20)
+    history.append({"role": role, "content": content})
+    try:
+        with open(MEMORY_FILE, "w", encoding="utf-8") as f:
+            json.dump(history, f, indent=2)
+    except Exception as e:
+        print(f"[Memory Save Error]: {e}")
+
+def clear_chat_memory() -> str:
+    """Clears local chat memory history."""
+    try:
+        if os.path.exists(MEMORY_FILE):
+            os.remove(MEMORY_FILE)
+        return "Chat memory wiped clean, Sir."
+    except Exception as e:
+        return f"Failed to reset chat memory: {str(e)}"
+
+# -------------------------------------------------------------
 # HYBRID FAST COMMAND ROUTER
 # -------------------------------------------------------------
 def handle_direct_commands(text):
     clean = text.lower()
     
+    if "chat reset" in clean or "reset chat" in clean or "clear memory" in clean:
+        return clear_chat_memory()
+
     file_triggers = ["search for file", "find file", "locate file", "file search"]
     if any(clean.startswith(prefix) for prefix in file_triggers):
         return handle_file_search_command(clean)
@@ -547,14 +586,27 @@ def handle_direct_commands(text):
             new_vol = min(100, current_vol + 15)
             return set_volume_level(new_vol)
 
-    if "brightness" in clean or "dim" in clean:
+    if "brightness" in clean or "dim" in clean or "dark" in clean or "bright" in clean:
+        try:
+            current_bright = sbc.get_brightness()
+            if isinstance(current_bright, list):
+                current_bright = current_bright[0]
+        except Exception:
+            current_bright = 50
+
+        if "max" in clean or "full" in clean or "brighten it up" in clean:
+            return set_brightness(100)
+        
         nums = re.findall(r'\b\d+\b', clean)
         if nums:
             return set_brightness(int(nums[0]))
-        if "max" in clean or "full" in clean:
-            return set_brightness(100)
-        if "dim" in clean or "lower" in clean:
-            return set_brightness(30)
+            
+        if any(w in clean for w in ["dim", "lower", "darker", "down"]):
+            new_b = max(0, current_bright - 20)
+            return set_brightness(new_b)
+        if any(w in clean for w in ["bright", "raise", "increase", "up", "higher", "dark"]):
+            new_b = min(100, current_bright + 25)
+            return set_brightness(new_b)
 
     if any(k in clean for k in ["lock pc", "lock workstation", "lock computer", "lock screen"]):
         return lock_workstation()
@@ -590,6 +642,7 @@ def handle_direct_commands(text):
             return launch_application(app_target)
 
     return None
+
 
 # -------------------------------------------------------------
 # 3. BACKGROUND ASSISTANT THREAD
@@ -627,7 +680,8 @@ class AssistantWorker(QThread):
         else:
             self.status_changed.emit("STANDBY")
 
-        messages = []
+        # Load persistent chat history
+        messages = load_chat_history(max_turns=5)
         SEARCH_TRIGGERS = [
             "search", "google", "look up", "who is", "who's", "what is", "what's",
             "richest", "wealthiest", "latest", "news", "score", "when is", "where is",
@@ -673,10 +727,23 @@ class AssistantWorker(QThread):
 
                 self.status_changed.emit("PROCESSING")
                 
+                # Check for Chat Reset command
+                if "chat reset" in clean_input or "reset chat" in clean_input or "clear memory" in clean_input:
+                    fast_reply = clear_chat_memory()
+                    messages.clear()
+                    self.status_changed.emit("SPEAKING")
+                    speak(fast_reply, self)
+                    self.status_changed.emit("STANDBY")
+                    self.is_busy = False
+                    self.busy_state_changed.emit(False)
+                    continue
+
                 # Instant hybrid command check
                 fast_reply = handle_direct_commands(user_input)
                 if fast_reply:
                     self.status_changed.emit("SPEAKING")
+                    save_chat_turn("user", user_input)
+                    save_chat_turn("assistant", fast_reply)
                     messages.append({"role": "user", "content": user_input})
                     messages.append({"role": "assistant", "content": fast_reply})
                     speak(fast_reply, self)
@@ -740,6 +807,8 @@ class AssistantWorker(QThread):
                     reply = "Task executed successfully, Sir."
 
                 self.status_changed.emit("SPEAKING")
+                save_chat_turn("user", user_input)
+                save_chat_turn("assistant", reply)
                 messages.append({"role": "user", "content": user_input})
                 messages.append({"role": "assistant", "content": reply})
                 speak(reply, self)
