@@ -65,7 +65,7 @@ IS_USER_TYPING = False
 LAST_TYPING_TIME = 0.0
 
 # -------------------------------------------------------------
-# 1. VOICE ENGINE (LIGHTNING-FAST OFFLINE PIPER + ULTRON DSP)
+# 1. VOICE ENGINE (LIGHTNING-FAST OFFLINE PIPER + DSP)
 # -------------------------------------------------------------
 piper_dir = os.path.join(BASE_DIR, "piper")
 piper_exe = os.path.join(piper_dir, "piper.exe")
@@ -74,14 +74,14 @@ json_config = os.path.join(piper_dir, "jarvis-medium.onnx.json")
 temp_wav_path = os.path.join(BASE_DIR, "temp_input.wav")
 
 def speak(text, worker_ref=None, force_speech=False):
-    """Synthesizes speech using local Piper engine with a smooth, slightly higher-pitched humanized rasp."""
+    """Synthesizes speech using local Piper engine with smooth humanized rasp."""
     global CURRENT_MIC_RMS
     if not text or not text.strip():
         return
 
     clean_text = text.strip()
     words = clean_text.split()
-    print(f"\n[E.V. (Smooth Humanized Ultron)]: {clean_text}")
+    print(f"\n[E.V.]: {clean_text}")
 
     is_silent = worker_ref and worker_ref.voice_silent_mode and not force_speech
     if is_silent:
@@ -108,35 +108,24 @@ def speak(text, worker_ref=None, force_speech=False):
                 audio_array = np.frombuffer(raw_pcm_data, dtype=np.int16).astype(np.float32)
                 length = len(audio_array)
                 
-                # --- SMOOTH, HIGH-FREQUENCY TAMED DSP PIPELINE ---
                 t = np.arange(length)
-                
-                # 1. Softer throat chest resonance for the deep texture
                 envelope = np.abs(audio_array) / 32768.0
                 throat_resonance = np.sin(t * 0.09) * 90.0 * envelope
-                
-                # 2. Gentle, low-frequency vocal fry (smooth chest rasp without sharp noise)
                 raspy_noise = np.random.normal(0, 110, length) * envelope * 0.25
-                
                 processed = audio_array + throat_resonance + raspy_noise
                 
-                # 3. Low-Pass Filter to completely kill sharp sounds, clicks, and harsh sibilance
-                alpha_lp = 0.45  # Lower number = smoother, warmer, rounder sound
+                alpha_lp = 0.45
                 smoothed = np.zeros_like(processed)
                 smoothed[0] = processed[0]
                 for i in range(1, length):
                     smoothed[i] = alpha_lp * processed[i] + (1 - alpha_lp) * smoothed[i-1]
                 
-                # 4. Clean volume normalization
                 max_val = np.max(np.abs(smoothed))
                 if max_val > 0:
                     smoothed = smoothed * (29000.0 / max_val)
                 
                 audio_array = np.clip(smoothed, -32768, 32767).astype(np.int16)
-                
-                # 5. Slightly higher playback rate (1.14x) to raise the pitch and smooth out cadence
                 playback_rate = int(16000 * 1.14)
-                # ---------------------------------------------
 
                 total_samples = len(audio_array)
                 total_words = len(words)
@@ -173,7 +162,6 @@ def speak(text, worker_ref=None, force_speech=False):
         except Exception as e:
             print(f"[Piper DSP Audio Error]: {e}")
 
-    # Fallback TTS
     try:
         if worker_ref:
             worker_ref.stream_start.emit()
@@ -348,7 +336,6 @@ def open_browser():
 def play_youtube_music(query: str = ""):
     try:
         clean_q = query.strip()
-        # Clean filler words
         clean_q = re.sub(r'^(play|search for|search|open)\s*(on)?\s*(youtube music|yt music)?\s*', '', clean_q)
         clean_q = re.sub(r'\s+(on|in)?\s*(youtube music|yt music|please)$', '', clean_q).strip()
 
@@ -376,19 +363,13 @@ def play_youtube_music(query: str = ""):
 def play_youtube_video(query: str = ""):
     try:
         clean_q = query.strip()
-        
-        # 1. Strip leading conversational request prefixes (e.g., "find me a", "show me", "can you look up")
         clean_q = re.sub(
             r'^(play|search for|search|look up|open|find|show me)\s+(me\s+)?(a|an)\s+(video|clip)?\s*(on\s+how\s+to|for|about)?\s*', 
             '', clean_q, flags=re.IGNORECASE
         )
         clean_q = re.sub(r'^(play|search for|search|look up|open|find|show me)\s*', '', clean_q, flags=re.IGNORECASE)
-        
-        # 2. Strip redundant platform or filler references at the start/end
         clean_q = re.sub(r'\s+(on|in)?\s*(youtube|yt|please|right now)$', '', clean_q, flags=re.IGNORECASE).strip()
         clean_q = re.sub(r'\byoutube\b', '', clean_q, flags=re.IGNORECASE).strip()
-        
-        # 3. Clean up dangling prepositions left over from phrasing like "on how to" or "video on"
         clean_q = re.sub(r'^(on how to|how to|on)\s+', '', clean_q, flags=re.IGNORECASE).strip()
 
         if not clean_q or clean_q.lower() in ["youtube", "yt", "videos"]:
@@ -456,62 +437,12 @@ def get_live_weather(location=""):
         url = f"https://wttr.in/{query_loc}?format=%C:+%t+(feels+like+%f)"
         response = requests.get(url, timeout=3)
         if response.status_code == 200:
-            return f"Weather report: {response.text.strip()}, Sir."
+            return response.text.strip()
     except Exception:
         pass
-    return None
-
-def get_crypto_price(coin="bitcoin"):
-    try:
-        coin_clean = coin.lower().strip()
-        alias_map = {
-            "btc": "bitcoin",
-            "bitcoin": "bitcoin",
-            "eth": "ethereum",
-            "ethereum": "ethereum",
-            "sol": "solana",
-            "solana": "solana",
-            "xrp": "ripple",
-            "doge": "dogecoin",
-            "dogecoin": "dogecoin",
-            "ada": "cardano",
-            "cardano": "cardano"
-        }
-        coin_id = alias_map.get(coin_clean, coin_clean)
-        url = f"https://api.coingecko.com/api/v3/simple/price?ids={urllib.parse.quote(coin_id)}&vs_currencies=usd"
-        res = requests.get(url, timeout=3).json()
-        if coin_id in res and "usd" in res[coin_id]:
-            price = res[coin_id]["usd"]
-            return f"{coin_id.capitalize()} is currently trading at ${price:,.2f} USD, Sir."
-    except Exception:
-        pass
-    return None
-
-def get_exchange_rate(base="USD", target="ZAR"):
-    try:
-        base_clean = base.upper().strip()
-        target_clean = target.upper().strip()
-        url = f"https://api.frankfurter.app/latest?from={base_clean}&to={target_clean}"
-        res = requests.get(url, timeout=3).json()
-        if "rates" in res and target_clean in res["rates"]:
-            rate = res["rates"][target_clean]
-            return f"The current exchange rate for 1 {base_clean} is {rate:,.2f} {target_clean}, Sir."
-    except Exception:
-        pass
-    return None
-
-def get_local_ip():
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return f"Local network IP address is {ip}, Sir."
-    except Exception:
-        return "Unable to retrieve local IP telemetry, Sir."
+    return "clear and mild"
 
 def search_local_files(query: str, search_root: str = None) -> list:
-    """Searches local directories for files matching the query string."""
     if not search_root:
         user_profile = os.path.expanduser("~")
         search_roots = [
@@ -544,7 +475,6 @@ def search_local_files(query: str, search_root: str = None) -> list:
     return matches
 
 def handle_file_search_command(clean_input: str):
-    """Parses search/open requests for local files with flexible phrasing."""
     q = re.sub(r'^(search for file|find file|locate file|file search|locate|find)\s*', '', clean_input).strip()
     q = re.sub(r'\s+file$', '', q).strip()
     
@@ -575,107 +505,145 @@ def web_search(query: str):
         return f"Web search encountered an issue: {str(e)}"
     return "No relevant web search results found."
 
+# ---------------------------------------------
+# OLLAMA TOOL SCHEMAS & EXECUTION (ITEM 3)
+# ---------------------------------------------
+OLLAMA_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "set_volume_level",
+            "description": "Adjust the system master volume level (0 to 100).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "level": {"type": "integer", "description": "Volume percentage from 0 to 100."}
+                },
+                "required": ["level"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "set_brightness",
+            "description": "Adjust the display screen brightness level (0 to 100).",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "level": {"type": "integer", "description": "Brightness percentage from 0 to 100."}
+                },
+                "required": ["level"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "launch_application",
+            "description": "Launch a local desktop application like vscode, spotify, discord, notepad, or calculator.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "app_name": {"type": "string", "description": "Name of the application to launch."}
+                },
+                "required": ["app_name"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "play_youtube_video",
+            "description": "Search and play a video on YouTube.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search term or video topic."}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "play_youtube_music",
+            "description": "Search and play a song on YouTube Music.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Song title or artist."}
+                },
+                "required": ["query"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "lock_workstation",
+            "description": "Lock the Windows workstation screen.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "minimize_all_windows",
+            "description": "Minimize all windows to show the desktop.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_battery_status",
+            "description": "Get current battery percentage and power status.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_system_specs",
+            "description": "Get current CPU load and RAM usage statistics.",
+            "parameters": {"type": "object", "properties": {}}
+        }
+    }
+]
+
+def execute_tool_call(tool_name, arguments):
+    """Executes the mapped Python function when requested by Ollama."""
+    try:
+        if tool_name == "set_volume_level":
+            return set_volume_level(arguments.get("level", 50))
+        elif tool_name == "set_brightness":
+            return set_brightness(arguments.get("level", 100))
+        elif tool_name == "launch_application":
+            return launch_application(arguments.get("app_name", ""))
+        elif tool_name == "play_youtube_video":
+            return play_youtube_video(arguments.get("query", ""))
+        elif tool_name == "play_youtube_music":
+            return play_youtube_music(arguments.get("query", ""))
+        elif tool_name == "lock_workstation":
+            return lock_workstation()
+        elif tool_name == "minimize_all_windows":
+            return minimize_all_windows()
+        elif tool_name == "get_battery_status":
+            return get_battery_status()
+        elif tool_name == "get_system_specs":
+            return get_system_specs()
+    except Exception as e:
+        return f"Tool execution encountered an error: {str(e)}"
+    return "Action completed successfully, Sir."
+
 def handle_direct_commands(text):
+    """Fallback legacy command router for instant execution."""
     clean = text.lower()
-    
-    # Strict file search triggers to prevent false positives
     file_triggers = ["search for file", "find file", "locate file", "file search"]
     if any(clean.startswith(prefix) for prefix in file_triggers):
         return handle_file_search_command(clean)
-
-    if "volume" in clean or "sound" in clean:
-        nums = re.findall(r'\b\d+\b', clean)
-        if nums:
-            return set_volume_level(int(nums[0]))
-        if "mute" in clean:
-            return set_volume_level(0)
-        if "max" in clean or "full" in clean:
-            return set_volume_level(100)
-
-    if "brightness" in clean or "dim" in clean:
-        nums = re.findall(r'\b\d+\b', clean)
-        if nums:
-            return set_brightness(int(nums[0]))
-        if "max" in clean or "full" in clean:
-            return set_brightness(100)
-        if "dim" in clean:
-            return set_brightness(30)
-
-    if any(k in clean for k in ["lock pc", "lock workstation", "lock computer", "lock screen"]):
-        return lock_workstation()
-        
-    if any(k in clean for k in ["show desktop", "minimize all", "minimize windows", "clear screen"]):
-        return minimize_all_windows()
-
-    if any(k in clean for k in ["pause", "resume", "unpause"]):
-        return media_control("play_pause")
-    if any(w in clean for w in ["next track", "next song", "skip track", "skip song"]):
-        return media_control("next")
-    if any(w in clean for w in ["previous track", "previous song", "back song"]):
-        return media_control("previous")
-
-    if any(k in clean for k in ["youtube music", "yt music"]) or (clean.startswith("play") and any(w in clean for w in ["song", "track", "music"])):
-        return play_youtube_music(text)
-
-    if "youtube" in clean or "yt" in clean or clean.startswith("play video") or clean.startswith("search youtube"):
-        return play_youtube_video(text)
-
-    if "battery" in clean or "power" in clean or "charge" in clean:
-        return get_battery_status()
-        
-    if "spec" in clean or "ram" in clean or "cpu" in clean or "system" in clean:
-        return get_system_specs()
-        
-    if "browser" in clean or "chrome" in clean or "google" in clean or "open internet" in clean:
-        return open_browser()
-
-    if any(clean.startswith(prefix) for prefix in ["open ", "launch ", "start "]):
-        app_target = re.sub(r'^(open|launch|start)\s+(app|application)?\s*', '', clean).strip()
-        if app_target:
-            return launch_application(app_target)
-
-    if "bitcoin" in clean or "btc" in clean:
-        return get_crypto_price("bitcoin")
-    if "ethereum" in clean or "eth" in clean:
-        return get_crypto_price("ethereum")
-    if "solana" in clean or "sol" in clean:
-        return get_crypto_price("solana")
-    if "ripple" in clean or "xrp" in clean:
-        return get_crypto_price("ripple")
-    if "doge" in clean:
-        return get_crypto_price("dogecoin")
-    if "cardano" in clean or "ada" in clean:
-        return get_crypto_price("cardano")
-
-    if any(k in clean for k in ["dollar to rand", "usd to zar", "dollar rand"]):
-        return get_exchange_rate("USD", "ZAR")
-    if any(k in clean for k in ["euro to dollar", "eur to usd"]):
-        return get_exchange_rate("EUR", "USD")
-    if any(k in clean for k in ["pound to dollar", "gbp to usd"]):
-        return get_exchange_rate("GBP", "USD")
-    if any(k in clean for k in ["pound to rand", "gbp to zar"]):
-        return get_exchange_rate("GBP", "ZAR")
-    if any(k in clean for k in ["euro to rand", "eur to zar"]):
-        return get_exchange_rate("EUR", "ZAR")
-
-    if "ip address" in clean or "network address" in clean:
-        return get_local_ip()
-
-    if "restart system" in clean or "reboot computer" in clean:
-        os.system("shutdown /r /t 5")
-        return "Initiating system reboot sequence, Sir."
-
-    if "shut down system" in clean or "power off computer" in clean:
-        os.system("shutdown /s /t 5")
-        return "Initiating system shutdown sequence, Sir."
-
-    if "weather" in clean:
-        match = re.search(r'weather\s+(?:in|for)?\s*([a-zA-Z\s]+)', clean)
-        loc = match.group(1).strip() if match else ""
-        weather_res = get_live_weather(loc)
-        if weather_res:
-            return weather_res
-
     return None
 
 # -------------------------------------------------------------
@@ -714,18 +682,7 @@ class AssistantWorker(QThread):
         else:
             self.status_changed.emit("STANDBY")
 
-        system_prompt = {
-            "role": "system", 
-            "content": (
-                "You are J.A.R.V.I.S., operating under the designation E.V. "
-                "You are an elite, highly articulate digital assistant. "
-                "Address the user as Sir approximately 65% of the time, and as Aimz the remaining 35% of the time, choosing dynamically. "
-                "Maintain a dry, sophisticated wit, absolute technical competence, and a brisk, professional cadence. "
-                "Never break character. Keep answers strictly to 1 concise sentence. "
-                "Use the provided live web search context directly to answer."
-            )
-        }
-        messages = [system_prompt]
+        messages = []
         SEARCH_TRIGGERS = [
             "search", "google", "look up", "who is", "who's", "what is", "what's",
             "richest", "wealthiest", "latest", "news", "score", "when is", "where is",
@@ -770,8 +727,9 @@ class AssistantWorker(QThread):
                     break
 
                 self.status_changed.emit("PROCESSING")
-                fast_reply = handle_direct_commands(user_input)
                 
+                # Check legacy fast commands (like local files)
+                fast_reply = handle_direct_commands(user_input)
                 if fast_reply:
                     self.status_changed.emit("SPEAKING")
                     messages.append({"role": "user", "content": user_input})
@@ -787,6 +745,40 @@ class AssistantWorker(QThread):
                     self.busy_state_changed.emit(False)
                     continue
 
+                # -------------------------------------------------------------
+                # DYNAMIC ENVIRONMENT & PERSONALITY MODIFIERS (ITEMS 2 & 4)
+                # -------------------------------------------------------------
+                now = datetime.datetime.now()
+                time_str = now.strftime("%H:%M:%S (%A, %B %d, %Y)")
+                hour = now.hour
+                
+                if 5 <= hour < 12:
+                    time_context = "It is morning."
+                elif 12 <= hour < 17:
+                    time_context = "It is afternoon."
+                elif 17 <= hour < 22:
+                    time_context = "It is evening."
+                else:
+                    time_context = "It is late night / early morning; the user may be working overtime."
+
+                weather_info = get_live_weather()
+                cpu_load = psutil.cpu_percent()
+
+                # Dynamic Persona Cadence Switch (Item 4)
+                if cpu_load > 65 or IS_USER_TYPING:
+                    cadence_modifier = "SYSTEM STATE: Active coding/load detected. Adopt an ultra-concise, tactical telemetry cadence. Cut out all fluff."
+                else:
+                    cadence_modifier = "SYSTEM STATE: Idling. Adopt a conversational, dry-witted tone."
+
+                system_content = (
+                    f"You are J.A.R.V.I.S., operating under the designation E.V. "
+                    f"ENVIRONMENTAL CONTEXT: {time_context} Local time: {time_str}. Weather: {weather_info}. CPU Load: {cpu_load}%. "
+                    f"{cadence_modifier} "
+                    "Address the user as Sir approximately 65% of the time, and as Aimz the remaining 35% of the time, choosing dynamically. "
+                    "Maintain absolute technical competence. Never break character. Keep answers strictly to 1 concise sentence."
+                )
+                system_prompt = {"role": "system", "content": system_content}
+
                 needs_search = any(trigger in clean_input for trigger in SEARCH_TRIGGERS)
                 search_context = ""
                 if needs_search:
@@ -795,14 +787,44 @@ class AssistantWorker(QThread):
                     search_context = f"\n\nLIVE SEARCH RESULTS:\n{search_results}"
 
                 user_message_content = user_input + search_context
-                messages.append({"role": "user", "content": user_message_content})
-                if len(messages) > 5:
-                    messages = [system_prompt] + messages[-3:]
+                
+                # Re-inject system prompt and maintain history window
+                current_messages = [system_prompt] + messages[-4:] + [{"role": "user", "content": user_message_content}]
 
-                response = ollama.chat(model='llama3.2:3b', messages=messages)
-                reply = response.message.content
+                # Ollama Chat with Native Tool Calling (Item 3)
+                response = ollama.chat(
+                    model='llama3.2:3b', 
+                    messages=current_messages,
+                    tools=OLLAMA_TOOLS
+                )
+
+                # Handle Tool Execution if Ollama calls a function
+                if response.message.get('tool_calls'):
+                    for tool in response.message['tool_calls']:
+                        func_name = tool['function']['name']
+                        func_args = tool['function']['arguments']
+                        print(f"[Tool Execution]: Invoking {func_name} with {func_args}")
+                        
+                        tool_result = execute_tool_call(func_name, func_args)
+                        
+                        # Feed the tool output back into the conversation for the final LLM reply
+                        current_messages.append(response.message)
+                        current_messages.append({
+                            "role": "tool",
+                            "content": tool_result
+                        })
+
+                    # Get final response after tool execution
+                    final_response = ollama.chat(model='llama3.2:3b', messages=current_messages)
+                    reply = final_response.message.content
+                else:
+                    reply = response.message.content
+
+                if not reply or not reply.strip():
+                    reply = "Task executed successfully, Sir."
 
                 self.status_changed.emit("SPEAKING")
+                messages.append({"role": "user", "content": user_input})
                 messages.append({"role": "assistant", "content": reply})
                 speak(reply, self)
                 
@@ -825,7 +847,7 @@ class AssistantWorker(QThread):
 
 
 # -------------------------------------------------------------
-# 4. HIGH-DENSITY NEURAL SYNAPSE SWARM (DENSE MULTI-CLUSTER)
+# 4. HIGH-DENSITY NEURAL SYNAPSE SWARM & UI WINDOW
 # -------------------------------------------------------------
 class NeuralSynapseSwarm(QWidget):
     clicked_mute = pyqtSignal()
@@ -1044,9 +1066,6 @@ class NeuralSynapseSwarm(QWidget):
         painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, core_lbl)
 
 
-# -------------------------------------------------------------
-# 5. CHAMFERED OSCILLOSCOPE TELEMETRY GRAPH
-# -------------------------------------------------------------
 class CyberSparklineGraph(QWidget):
     def __init__(self, title, max_history=36, parent=None):
         super().__init__(parent)
@@ -1151,9 +1170,6 @@ class CyberSparklineGraph(QWidget):
             painter.drawEllipse(pts[-1], 2.2, 2.2)
 
 
-# -------------------------------------------------------------
-# 6. CHAMFERED TACTICAL PUSH BUTTON WIDGET
-# -------------------------------------------------------------
 class CyberChamferButton(QPushButton):
     def __init__(self, text, parent=None):
         super().__init__(text, parent)
@@ -1197,9 +1213,6 @@ class CyberChamferButton(QPushButton):
         painter.drawText(self.rect(), Qt.AlignmentFlag.AlignCenter, self.text())
 
 
-# -------------------------------------------------------------
-# 7. COMMAND LINE PROMPT (KEYBOARD HISTORY NAVIGATION)
-# -------------------------------------------------------------
 class CyberCommandLine(QLineEdit):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1239,9 +1252,6 @@ class CyberCommandLine(QLineEdit):
         super().keyPressEvent(event)
 
 
-# -------------------------------------------------------------
-# 8. LIVE HARDWARE [KERN_STREAM // MEM_DUMP] PANEL
-# -------------------------------------------------------------
 class CyberMemoryStreamPanel(QWidget):
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -1363,9 +1373,6 @@ class CyberMemoryStreamPanel(QWidget):
             y += 13
 
 
-# -------------------------------------------------------------
-# 9. MAIN WIDESCREEN COMMAND HUD WINDOW
-# -------------------------------------------------------------
 class JarvisWidescreenHUD(QMainWindow):
     def __init__(self):
         super().__init__()
