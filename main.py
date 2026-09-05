@@ -191,24 +191,6 @@ def speak(text, worker_ref=None, force_speech=False):
     except Exception as e:
         print(f"[TTS Fallback Error]: {e}")
 
-    # Fallback TTS
-    try:
-        if worker_ref:
-            worker_ref.stream_start.emit()
-            for w in words:
-                worker_ref.stream_word.emit(w + " ")
-                time.sleep(0.035)
-            worker_ref.stream_end.emit()
-
-        import pyttsx3
-        engine = pyttsx3.init('sapi5')
-        engine.setProperty('rate', 190)
-        engine.say(clean_text)
-        engine.runAndWait()
-        engine.stop()
-    except Exception as e:
-        print(f"[TTS Fallback Error]: {e}")
-
 print("Loading Whisper Speech Engine (base.en with VAD)... Please wait.")
 try:
     stt_model = WhisperModel("base.en", device="cuda", compute_type="float16")
@@ -222,7 +204,8 @@ WHISPER_PROMPT = (
     "system specs, RAM, CPU, weather, search, look up, price, Bitcoin, Ethereum, "
     "Solana, dollar, rand, euro, pound, exchange rate, richest, net worth, YouTube, "
     "YouTube Music, play, pause, open, VS Code, Spotify, Discord, Explorer, Task Manager, "
-    "ip address, network address, restart system, shut down system"
+    "ip address, network address, restart system, shut down system, search for file, "
+    "find file, locate file, file search, locate file, find file"
 )
 
 def listen(worker_ref=None, silence_limit=0.6, threshold=450):
@@ -508,6 +491,60 @@ def get_local_ip():
     except Exception:
         return "Unable to retrieve local IP telemetry, Sir."
 
+def search_local_files(query: str, search_root: str = None) -> list:
+    """Searches local directories for files matching the query string."""
+    if not search_root:
+        user_profile = os.path.expanduser("~")
+        search_roots = [
+            os.path.join(user_profile, "Desktop"),
+            os.path.join(user_profile, "Documents"),
+            os.path.join(user_profile, "Downloads")
+        ]
+    else:
+        search_roots = [search_root]
+
+    matches = []
+    clean_query = query.lower().strip()
+
+    for root_dir in search_roots:
+        if not os.path.exists(root_dir):
+            continue
+        try:
+            for dirpath, _, filenames in os.walk(root_dir):
+                for filename in filenames:
+                    if clean_query in filename.lower():
+                        full_path = os.path.join(dirpath, filename)
+                        matches.append(full_path)
+                        if len(matches) >= 5:
+                            break
+                if len(matches) >= 5:
+                    break
+        except Exception as e:
+            print(f"[File Search Error in {root_dir}]: {e}")
+
+    return matches
+
+def handle_file_search_command(clean_input: str):
+    """Parses search/open requests for local files with flexible phrasing."""
+    q = re.sub(r'^(search for file|find file|locate file|file search|locate|find)\s*', '', clean_input).strip()
+    q = re.sub(r'\s+file$', '', q).strip()
+    
+    if not q:
+        return "Please specify a file name to search for, Sir."
+
+    matches = search_local_files(q)
+    if not matches:
+        return f"No local files matching '{q}' were found, Sir."
+
+    top_match = matches[0]
+    file_name = os.path.basename(top_match)
+    
+    try:
+        os.startfile(top_match)
+        return f"Located and opened {file_name}, Sir."
+    except Exception as e:
+        return f"Found {file_name}, but failed to launch it: {str(e)}"
+
 def web_search(query: str):
     try:
         with DDGS() as ddgs:
@@ -522,6 +559,11 @@ def web_search(query: str):
 def handle_direct_commands(text):
     clean = text.lower()
     
+    file_triggers = ["search for file", "find file", "locate file", "file search", "locate", "find"]
+    if any(clean.startswith(prefix) for prefix in file_triggers):
+        if "file" in clean or len(clean.split()) > 1:
+            return handle_file_search_command(clean)
+
     if "volume" in clean or "sound" in clean:
         nums = re.findall(r'\b\d+\b', clean)
         if nums:
@@ -660,9 +702,10 @@ class AssistantWorker(QThread):
         system_prompt = {
             "role": "system", 
             "content": (
-                "You are E.V., an elite, highly articulate AI assistant modeled after J.A.R.V.I.S. "
-                "Address the user exclusively as Sir. "
-                "Maintain a dry, sophisticated wit, absolute competence, and a brisk, professional cadence. "
+                "You are J.A.R.V.I.S., operating under the designation E.V. "
+                "You are an elite, highly articulate digital assistant. "
+                "Address the user as Sir approximately 65% of the time, and as Aimz the remaining 35% of the time, choosing dynamically. "
+                "Maintain a dry, sophisticated wit, absolute technical competence, and a brisk, professional cadence. "
                 "Never break character. Keep answers strictly to 1 concise sentence. "
                 "Use the provided live web search context directly to answer."
             )
