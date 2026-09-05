@@ -205,7 +205,7 @@ WHISPER_PROMPT = (
     "Solana, dollar, rand, euro, pound, exchange rate, richest, net worth, YouTube, "
     "YouTube Music, play, pause, open, VS Code, Spotify, Discord, Explorer, Task Manager, "
     "ip address, network address, restart system, shut down system, search for file, "
-    "find file, locate file, file search, locate file, find file"
+    "find file, locate file, file search"
 )
 
 def listen(worker_ref=None, silence_limit=0.6, threshold=450):
@@ -348,6 +348,10 @@ def open_browser():
 def play_youtube_music(query: str = ""):
     try:
         clean_q = query.strip()
+        # Clean filler words
+        clean_q = re.sub(r'^(play|search for|search|open)\s*(on)?\s*(youtube music|yt music)?\s*', '', clean_q)
+        clean_q = re.sub(r'\s+(on|in)?\s*(youtube music|yt music|please)$', '', clean_q).strip()
+
         if not clean_q or clean_q in ["youtube music", "yt music", "music", "songs"]:
             webbrowser.open("https://music.youtube.com")
             return "Opening YouTube Music, Sir."
@@ -372,7 +376,22 @@ def play_youtube_music(query: str = ""):
 def play_youtube_video(query: str = ""):
     try:
         clean_q = query.strip()
-        if not clean_q or clean_q in ["youtube", "yt", "videos"]:
+        
+        # 1. Strip leading conversational request prefixes (e.g., "find me a", "show me", "can you look up")
+        clean_q = re.sub(
+            r'^(play|search for|search|look up|open|find|show me)\s+(me\s+)?(a|an)\s+(video|clip)?\s*(on\s+how\s+to|for|about)?\s*', 
+            '', clean_q, flags=re.IGNORECASE
+        )
+        clean_q = re.sub(r'^(play|search for|search|look up|open|find|show me)\s*', '', clean_q, flags=re.IGNORECASE)
+        
+        # 2. Strip redundant platform or filler references at the start/end
+        clean_q = re.sub(r'\s+(on|in)?\s*(youtube|yt|please|right now)$', '', clean_q, flags=re.IGNORECASE).strip()
+        clean_q = re.sub(r'\byoutube\b', '', clean_q, flags=re.IGNORECASE).strip()
+        
+        # 3. Clean up dangling prepositions left over from phrasing like "on how to" or "video on"
+        clean_q = re.sub(r'^(on how to|how to|on)\s+', '', clean_q, flags=re.IGNORECASE).strip()
+
+        if not clean_q or clean_q.lower() in ["youtube", "yt", "videos"]:
             webbrowser.open("https://www.youtube.com")
             return "Opening YouTube, Sir."
 
@@ -559,10 +578,10 @@ def web_search(query: str):
 def handle_direct_commands(text):
     clean = text.lower()
     
-    file_triggers = ["search for file", "find file", "locate file", "file search", "locate", "find"]
+    # Strict file search triggers to prevent false positives
+    file_triggers = ["search for file", "find file", "locate file", "file search"]
     if any(clean.startswith(prefix) for prefix in file_triggers):
-        if "file" in clean or len(clean.split()) > 1:
-            return handle_file_search_command(clean)
+        return handle_file_search_command(clean)
 
     if "volume" in clean or "sound" in clean:
         nums = re.findall(r'\b\d+\b', clean)
@@ -596,14 +615,10 @@ def handle_direct_commands(text):
         return media_control("previous")
 
     if any(k in clean for k in ["youtube music", "yt music"]) or (clean.startswith("play") and any(w in clean for w in ["song", "track", "music"])):
-        q = re.sub(r'^(play|search for|search|open)\s+(song|track|music)?\s*', '', clean)
-        q = re.sub(r'\s+(on|in)?\s*(youtube music|yt music)$', '', q).strip()
-        return play_youtube_music(q)
+        return play_youtube_music(text)
 
-    if "youtube" in clean or "yt" in clean or clean.startswith("play video"):
-        q = re.sub(r'^(play|search for|search|look up|open)\s+(video)?\s*', '', clean)
-        q = re.sub(r'\s+(on|in)?\s*(youtube|yt)$', '', q).strip()
-        return play_youtube_video(q)
+    if "youtube" in clean or "yt" in clean or clean.startswith("play video") or clean.startswith("search youtube"):
+        return play_youtube_video(text)
 
     if "battery" in clean or "power" in clean or "charge" in clean:
         return get_battery_status()
@@ -755,7 +770,7 @@ class AssistantWorker(QThread):
                     break
 
                 self.status_changed.emit("PROCESSING")
-                fast_reply = handle_direct_commands(clean_input)
+                fast_reply = handle_direct_commands(user_input)
                 
                 if fast_reply:
                     self.status_changed.emit("SPEAKING")
