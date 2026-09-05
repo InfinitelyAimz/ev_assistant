@@ -13,15 +13,14 @@ import ctypes
 import math
 import random
 import warnings
+import socket
 from collections import deque
 
-# Suppress deprecation and cache warnings
 warnings.filterwarnings("ignore", category=UserWarning)
 warnings.filterwarnings("ignore", category=DeprecationWarning)
 warnings.filterwarnings("ignore", category=RuntimeWarning)
 os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
 
-# Anchor all operations to the script's exact directory
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 import sounddevice as sd
@@ -55,20 +54,18 @@ try:
 except Exception:
     ytmusic_client = None
 
-# Global dynamic signals and telemetry
 CURRENT_MIC_RMS = 0.0
-START_TIME = psutil.boot_time()  # Actual PC Boot Uptime
+START_TIME = psutil.boot_time()
 LAST_NET_IO = psutil.net_io_counters()
 LAST_NET_TIME = time.time()
 NET_UP_SPEED = 0.0
 NET_DOWN_SPEED = 0.0
 
-# Typing protection flag to ignore keyboard clatter on mic
 IS_USER_TYPING = False
 LAST_TYPING_TIME = 0.0
 
 # -------------------------------------------------------------
-# 1. VOICE ENGINE (PIPER TTS & WHISPER STT - EAR-SAFE BARITONE DSP)
+# 1. VOICE ENGINE (LIGHTNING-FAST OFFLINE PIPER + ULTRON DSP)
 # -------------------------------------------------------------
 piper_dir = os.path.join(BASE_DIR, "piper")
 piper_exe = os.path.join(piper_dir, "piper.exe")
@@ -77,14 +74,14 @@ json_config = os.path.join(piper_dir, "jarvis-medium.onnx.json")
 temp_wav_path = os.path.join(BASE_DIR, "temp_input.wav")
 
 def speak(text, worker_ref=None, force_speech=False):
-    """Synthesizes audio with ear-safe low-pass smoothing and deep sub-bass baritone weighting."""
+    """Synthesizes speech using local Piper engine with optimized dual-stage Ultron baritone DSP filtering."""
     global CURRENT_MIC_RMS
     if not text or not text.strip():
         return
 
     clean_text = text.strip()
     words = clean_text.split()
-    print(f"\n[E.V.]: {clean_text}")
+    print(f"\n[E.V. (Ultron)]: {clean_text}")
 
     is_silent = worker_ref and worker_ref.voice_silent_mode and not force_speech
     if is_silent:
@@ -96,6 +93,7 @@ def speak(text, worker_ref=None, force_speech=False):
             worker_ref.stream_end.emit()
         return
 
+    # Local Piper Generation with Enhanced Dual-Tap Ultron DSP Transformation
     if os.path.exists(piper_exe) and os.path.exists(voice_model):
         try:
             process = subprocess.Popen(
@@ -110,41 +108,42 @@ def speak(text, worker_ref=None, force_speech=False):
             if raw_pcm_data and len(raw_pcm_data) > 0:
                 audio_array = np.frombuffer(raw_pcm_data, dtype=np.int16).astype(np.float32)
                 
-                # --- WARM BARITONE SUB-BASS DSP (NO HARSH DISTORTION) ---
+                # --- OPTIMIZED ULTRON BARITONE & METALLIC DSP ---
                 length = len(audio_array)
-                delay_samples = 160
-                feedback = 0.22
+                delay_samples = 220
+                feedback = 0.32
+                
                 for i in range(delay_samples, length):
                     audio_array[i] += audio_array[i - delay_samples] * feedback
+                    if i > int(delay_samples * 1.5):
+                        audio_array[i] += audio_array[i - int(delay_samples * 1.5)] * (feedback * 0.5)
                 
-                alpha = 0.45
+                alpha = 0.35
                 filtered = np.zeros_like(audio_array)
                 filtered[0] = audio_array[0]
                 for i in range(1, length):
                     filtered[i] = alpha * audio_array[i] + (1 - alpha) * filtered[i-1]
                 
                 t = np.arange(length)
-                sub_bass = np.sin(t * 0.025) * 800.0 * (np.abs(filtered) / 32768.0)
-                audio_array = filtered + sub_bass
+                sub_bass = np.sin(t * 0.015) * 1100.0 * (np.abs(filtered) / 32768.0)
+                metallic_ring = np.sin(t * 0.4) * 150.0 * (filtered / 32768.0)
+                audio_array = filtered + sub_bass + metallic_ring
                 
                 audio_array = np.clip(audio_array, -32768, 32767).astype(np.int16)
-                # -------------------------------------------------------
+                # ---------------------------------------------
 
                 total_samples = len(audio_array)
                 sample_rate = 16000
                 total_words = len(words)
-                audio_duration = total_samples / float(sample_rate)
+                audio_duration = max(0.1, total_samples / float(sample_rate))
 
                 if worker_ref:
                     worker_ref.stream_start.emit()
 
-                # Start non-blocking playback
                 sd.play(audio_array, samplerate=sample_rate)
                 
-                # Snappier accelerated pacing
                 start_time = time.time()
                 emitted_words = 0
-                
                 while emitted_words < total_words:
                     elapsed = time.time() - start_time
                     target_index = int((elapsed / audio_duration) * total_words)
@@ -154,7 +153,6 @@ def speak(text, worker_ref=None, force_speech=False):
                         if worker_ref:
                             worker_ref.stream_word.emit(words[emitted_words] + " ")
                         emitted_words += 1
-                        
                     time.sleep(0.004)
 
                 sd.wait()
@@ -168,9 +166,9 @@ def speak(text, worker_ref=None, force_speech=False):
                 CURRENT_MIC_RMS = 0.0
                 return
         except Exception as e:
-            print(f"[Piper Paced Sync Error]: {e}")
+            print(f"[Piper DSP Audio Error]: {e}")
 
-    # Fallback
+    # Fallback TTS
     try:
         if worker_ref:
             worker_ref.stream_start.emit()
@@ -200,7 +198,8 @@ WHISPER_PROMPT = (
     "E.V., Aimz, Sir, brightness, volume, mute, unmute, mute e.v, unmute e.v, battery, "
     "system specs, RAM, CPU, weather, search, look up, price, Bitcoin, Ethereum, "
     "Solana, dollar, rand, euro, pound, exchange rate, richest, net worth, YouTube, "
-    "YouTube Music, play, pause, open, VS Code, Spotify, Discord, Explorer, Task Manager."
+    "YouTube Music, play, pause, open, VS Code, Spotify, Discord, Explorer, Task Manager, "
+    "ip address, network address, restart system, shut down system"
 )
 
 def listen(worker_ref=None, silence_limit=0.6, threshold=450):
@@ -476,6 +475,16 @@ def get_exchange_rate(base="USD", target="ZAR"):
         pass
     return None
 
+def get_local_ip():
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return f"Local network IP address is {ip}, Sir."
+    except Exception:
+        return "Unable to retrieve local IP telemetry, Sir."
+
 def web_search(query: str):
     try:
         with DDGS() as ddgs:
@@ -569,6 +578,17 @@ def handle_direct_commands(text):
     if any(k in clean for k in ["euro to rand", "eur to zar"]):
         return get_exchange_rate("EUR", "ZAR")
 
+    if "ip address" in clean or "network address" in clean:
+        return get_local_ip()
+
+    if "restart system" in clean or "reboot computer" in clean:
+        os.system("shutdown /r /t 5")
+        return "Initiating system reboot sequence, Sir."
+
+    if "shut down system" in clean or "power off computer" in clean:
+        os.system("shutdown /s /t 5")
+        return "Initiating system shutdown sequence, Sir."
+
     if "weather" in clean:
         match = re.search(r'weather\s+(?:in|for)?\s*([a-zA-Z\s]+)', clean)
         loc = match.group(1).strip() if match else ""
@@ -586,7 +606,6 @@ class AssistantWorker(QThread):
     user_speech_detected = pyqtSignal(str)
     app_shutdown_requested = pyqtSignal()
     
-    # Live Word-by-Word Stream Signals
     stream_start = pyqtSignal()
     stream_word = pyqtSignal(str)
     stream_end = pyqtSignal()
@@ -615,7 +634,6 @@ class AssistantWorker(QThread):
         else:
             self.status_changed.emit("STANDBY")
 
-        # Full J.A.R.V.I.S. Persona Prompt
         system_prompt = {
             "role": "system", 
             "content": (
@@ -729,7 +747,6 @@ class AssistantWorker(QThread):
 # 4. HIGH-DENSITY NEURAL SYNAPSE SWARM (DENSE MULTI-CLUSTER)
 # -------------------------------------------------------------
 class NeuralSynapseSwarm(QWidget):
-    """Dense multi-cluster neural connectome with 260+ nodes, axon highways, and super-node flares."""
     clicked_mute = pyqtSignal()
 
     def __init__(self, parent=None):
@@ -950,7 +967,6 @@ class NeuralSynapseSwarm(QWidget):
 # 5. CHAMFERED OSCILLOSCOPE TELEMETRY GRAPH
 # -------------------------------------------------------------
 class CyberSparklineGraph(QWidget):
-    """Oscilloscope graph with 45° chamfered shell, full rectangular grid, y-axis scales, and translucent fill."""
     def __init__(self, title, max_history=36, parent=None):
         super().__init__(parent)
         self.setFixedSize(148, 92)
@@ -1058,7 +1074,6 @@ class CyberSparklineGraph(QWidget):
 # 6. CHAMFERED TACTICAL PUSH BUTTON WIDGET
 # -------------------------------------------------------------
 class CyberChamferButton(QPushButton):
-    """Tactical push button with cutaway 45-degree chamfered corners."""
     def __init__(self, text, parent=None):
         super().__init__(text, parent)
         self.setFixedHeight(28)
@@ -1105,7 +1120,6 @@ class CyberChamferButton(QPushButton):
 # 7. COMMAND LINE PROMPT (KEYBOARD HISTORY NAVIGATION)
 # -------------------------------------------------------------
 class CyberCommandLine(QLineEdit):
-    """Command input with Up/Down arrow history navigation and typing protection."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.history = []
@@ -1148,7 +1162,6 @@ class CyberCommandLine(QLineEdit):
 # 8. LIVE HARDWARE [KERN_STREAM // MEM_DUMP] PANEL
 # -------------------------------------------------------------
 class CyberMemoryStreamPanel(QWidget):
-    """Samples real Windows kernel processes and active memory allocations with chamfered styling."""
     def __init__(self, parent=None):
         super().__init__(parent)
         self.state = "STANDBY"
@@ -1279,7 +1292,6 @@ class JarvisWidescreenHUD(QMainWindow):
         self.setFixedSize(1060, 610)
         self.setMouseTracking(True)
         
-        # Frameless Holographic Window
         self.setWindowFlags(Qt.WindowType.FramelessWindowHint | Qt.WindowType.WindowStaysOnTopHint)
         self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
 
@@ -1290,12 +1302,10 @@ class JarvisWidescreenHUD(QMainWindow):
 
         self.init_ui()
 
-        # Start Background Voice/Text Thread
         self.worker = AssistantWorker()
         self.worker.status_changed.connect(self.update_status)
         self.worker.user_speech_detected.connect(self.append_user_transcript)
         
-        # Connect Real-time Word-by-Word Synchronized Stream
         self.worker.stream_start.connect(self.handle_stream_start)
         self.worker.stream_word.connect(self.handle_stream_word)
         self.worker.stream_end.connect(self.handle_stream_end)
@@ -1305,12 +1315,10 @@ class JarvisWidescreenHUD(QMainWindow):
         self.worker.app_shutdown_requested.connect(self.close_application)
         self.worker.start()
 
-        # Typing Watcher Timer (resets typing flag after idle)
         self.typing_timer = QTimer(self)
         self.typing_timer.timeout.connect(self.check_typing_status)
         self.typing_timer.start(300)
 
-        # Real-time System Telemetry Timer
         self.stats_timer = QTimer(self)
         self.stats_timer.timeout.connect(self.update_telemetry)
         self.stats_timer.start(1000)
@@ -1363,7 +1371,6 @@ class JarvisWidescreenHUD(QMainWindow):
         root_layout.setContentsMargins(18, 12, 18, 12)
         root_layout.setSpacing(6)
 
-        # 1. Top Cyberpunk HUD Header
         top_bar = QHBoxLayout()
         self.title_label = QLabel("MARK-VIII // E.V. TACTICAL CYBERDECK")
         self.title_label.setFont(QFont("Consolas", 10, QFont.Weight.Bold))
@@ -1407,11 +1414,9 @@ class JarvisWidescreenHUD(QMainWindow):
         top_bar.addWidget(btn_close)
         root_layout.addLayout(top_bar)
 
-        # 2. Main Middle Section
         self.middle_section = QHBoxLayout()
         self.middle_section.setSpacing(12)
 
-        # LEFT PANEL: Terminal Feed with Synchronized Typewriter Output & History Input
         self.left_panel = QFrame()
         left_layout = QVBoxLayout(self.left_panel)
         left_layout.setContentsMargins(0, 0, 0, 0)
@@ -1436,11 +1441,10 @@ class JarvisWidescreenHUD(QMainWindow):
         self.console_edit.setReadOnly(True)
         left_layout.addWidget(self.console_edit, stretch=4)
 
-        # Command Line Prompt
         input_bar = QHBoxLayout()
         input_bar.setSpacing(6)
 
-        self.lbl_prompt = QLabel("Sir:~$")
+        self.lbl_prompt = QLabel("Aimz:~$")
         self.lbl_prompt.setFont(QFont("Consolas", 8, QFont.Weight.Bold))
         self.lbl_prompt.setStyleSheet("color: #60c5ba;")
 
@@ -1454,7 +1458,6 @@ class JarvisWidescreenHUD(QMainWindow):
 
         self.middle_section.addWidget(self.left_panel, stretch=2)
 
-        # CENTER: Dense Neural Synapse Swarm Core
         center_box = QVBoxLayout()
         center_box.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.reactor = NeuralSynapseSwarm()
@@ -1467,7 +1470,6 @@ class JarvisWidescreenHUD(QMainWindow):
         center_box.addWidget(self.status_label, alignment=Qt.AlignmentFlag.AlignCenter)
         self.middle_section.addLayout(center_box, stretch=2)
 
-        # RIGHT PANEL: Live Kernel Stream & Chamfered Controls
         self.right_panel = QFrame()
         right_layout = QVBoxLayout(self.right_panel)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -1491,7 +1493,6 @@ class JarvisWidescreenHUD(QMainWindow):
         self.middle_section.addWidget(self.right_panel, stretch=2)
         root_layout.addLayout(self.middle_section, stretch=3)
 
-        # 3. BOTTOM PANEL: Chamfered Oscilloscope Sparklines
         self.bottom_panel = QFrame()
         bottom_layout = QHBoxLayout(self.bottom_panel)
         bottom_layout.setContentsMargins(0, 2, 0, 0)
@@ -1515,9 +1516,6 @@ class JarvisWidescreenHUD(QMainWindow):
 
         self.setCentralWidget(self.main_container)
 
-    # ---------------------------------------------------------
-    # HUD Parallax & Drag Window Logic
-    # ---------------------------------------------------------
     def mousePressEvent(self, event):
         if event.button() == Qt.MouseButton.LeftButton:
             self.drag_position = event.globalPosition().toPoint() - self.frameGeometry().topLeft()
@@ -1648,14 +1646,11 @@ class JarvisWidescreenHUD(QMainWindow):
         sb = self.console_edit.verticalScrollBar()
         is_at_bottom = sb.value() >= sb.maximum() - 15
 
-        self.console_edit.append(f'<span style="color: #60c5ba; font-family: \'Consolas\', monospace; font-weight: bold;">Sir&gt;</span> <span style="font-family: \'Consolas\', monospace;">{safe_text}</span>')
+        self.console_edit.append(f'<span style="color: #60c5ba; font-family: \'Consolas\', monospace; font-weight: bold;">Aimz&gt;</span> <span style="font-family: \'Consolas\', monospace;">{safe_text}</span>')
         
         if is_at_bottom:
             sb.setValue(sb.maximum())
 
-    # ---------------------------------------------------------
-    # Synchronized Typewriter Stream Slots
-    # ---------------------------------------------------------
     def handle_stream_start(self):
         sb = self.console_edit.verticalScrollBar()
         is_at_bottom = sb.value() >= sb.maximum() - 15
@@ -1712,23 +1707,19 @@ class JarvisWidescreenHUD(QMainWindow):
         now = datetime.datetime.now()
         self.time_label.setText(now.strftime("%Y-%m-%d  %H:%M:%S"))
 
-        # CPU
         cpu = int(psutil.cpu_percent())
         self.graph_cpu.add_data_point(cpu, subtext=f"{cpu}%")
 
-        # RAM
         ram = psutil.virtual_memory()
         used_ram = round(ram.used / (1024**3), 1)
         self.graph_ram.add_data_point(ram.percent, subtext=f"{used_ram}G")
 
-        # Disk
         try:
             disk = psutil.disk_usage('/')
             self.graph_disk.add_data_point(disk.percent, subtext=f"{int(disk.percent)}%")
         except Exception:
             pass
 
-        # Network Speeds
         cur_net = psutil.net_io_counters()
         cur_time = time.time()
         dt = max(1e-5, cur_time - LAST_NET_TIME)
@@ -1742,7 +1733,6 @@ class JarvisWidescreenHUD(QMainWindow):
         self.graph_net_up.add_data_point(min(100.0, (NET_UP_SPEED / 1500.0) * 100), subtext=f"{int(NET_UP_SPEED)}K")
         self.graph_net_down.add_data_point(min(100.0, (NET_DOWN_SPEED / 3000.0) * 100), subtext=f"{int(NET_DOWN_SPEED)}K")
 
-        # Actual PC Uptime
         uptime_sec = int(time.time() - START_TIME)
         hrs, rem = divmod(uptime_sec, 3600)
         mins, _ = divmod(rem, 60)
